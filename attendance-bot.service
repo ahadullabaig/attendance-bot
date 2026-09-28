@@ -1,0 +1,12 @@
+[Unit]
+Description=MSRIT attendance Telegram bot
+
+[Service]
+WorkingDirectory=%h/msrit-attendance
+ExecStart=%h/.local/bin/uv run %h/msrit-attendance/bot.py
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

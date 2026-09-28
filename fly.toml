@@ -1,0 +1,14 @@
+app = "attendance-bot-6767"
+primary_region = "sin"  # Singapore: Fly closed Mumbai (bom) to new resources
+swap_size_mb = 512      # headroom for Chromium on a small machine
+
+[mounts]
+  source = "bot_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[[restart]]
+  policy = "always"

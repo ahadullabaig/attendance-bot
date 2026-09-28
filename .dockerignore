@@ -1,0 +1,4 @@
+# Only the code goes into the image; credentials come from `fly secrets`
+*
+!attendance.py
+!bot.py

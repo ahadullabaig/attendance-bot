@@ -1,0 +1,6 @@
+.env
+.session.json
+.browser-profile/
+debug/
+.bot-state.json
+__pycache__/
