@@ -4,3 +4,6 @@
 debug/
 .bot-state.json
 __pycache__/
+
+# Personal Claude Code notes
+CLAUDE.md

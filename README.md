@@ -41,27 +41,26 @@ uv run attendance.py --dump     # also save raw pages to debug/
 
 ### Example message
 
-The first line is what the phone notification shows, so it carries the verdict.
+The first line is what the phone notification shows, so it carries the verdict. (The numbers here are made up.)
 
 ```
 📊 Attendance — 2 courses below 85%
 
 🆕 Since last summary
 • Big Data Computing: +2 present
-• Parallel Programming on GPUs: absent 17-09-2026
+• Parallel Programming on GPUs: absent 22-09-2026
 
-⚠️ Parallel Programming on GPUs is at 77% — attend the next 7 classes to get back to 85%
-⚠️ Computer Organization and Architecture is at 82% — attend the next 3 classes to get back to 85%
+⚠️ Parallel Programming on GPUs is at 75% — attend the next 8 classes to get back to 85%
+⚠️ Computer Organization and Architecture is at 83% — attend the next 2 classes to get back to 85%
 
 Course            %   Came Skip
-PPG              77  10/13    3
-COA              82   9/11    4
-BDC              94  15/16    6
-OS               93  14/15    5
-PP Lab          100    5/5    2
-NoSQL Databases 100    5/5    2
+PPG              75   9/12    3
+COA              83  10/12    4
+BDC              94  17/18    6
+OS               92  12/13    5
+PP Lab          100    6/6    2
+NoSQL Databases 100    6/6    2
 NLP               –      –    –
-
 Skip = classes you can still miss and end the semester at 85%
 Portal updated 28 Sep · checked 19:00
 ```
@@ -151,7 +150,7 @@ uv run bot.py
 To start it automatically when you log in (systemd user service):
 
 ```sh
-ln -s ~/msrit-attendance/attendance-bot.service ~/.config/systemd/user/
+ln -s ~/attendance-bot/attendance-bot.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now attendance-bot
 ```
@@ -252,7 +251,7 @@ If `skip` is negative, 85% is out of reach even with full attendance. In that ca
 (P + x) / (H + x) ≥ 0.85   ⇒   x = ceil((85·H − 100·P) / 15)
 ```
 
-Example: 10 present out of 13 held (77%) → `ceil((1105 − 1000) / 15) = 7` classes.
+Example: 9 present out of 12 held (75%) → `ceil((1020 − 900) / 15) = 8` classes, and 17/20 is exactly 85%.
 
 Everything uses integer arithmetic, so there are no floating-point rounding errors at the boundary.
 
