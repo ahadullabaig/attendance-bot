@@ -177,11 +177,25 @@ fly deploy --ha=false --remote-only
 
 Stop any laptop copy afterwards: `systemctl --user disable --now attendance-bot`.
 
+### Automatic deploys
+
+`.github/workflows/deploy.yml` runs the tests on every pull request. When a push to `main` changes the code, `Dockerfile`, `fly.toml` or the workflow itself, it runs the tests and then deploys. Pushes that only touch docs or tests don't deploy, since that would just restart the bot.
+
+It deploys with a token that can only deploy this app, stored as the repository secret `FLY_API_TOKEN`. To create or replace it:
+
+```sh
+fly tokens create deploy -a attendance-bot-6767 -n "GitHub Actions" | gh secret set FLY_API_TOKEN
+```
+
+`fly tokens list -a attendance-bot-6767` shows the app's tokens, and `fly tokens revoke <id>` revokes one.
+
+A manual `fly deploy` still works, but it ships your local folder, including uncommitted changes. Merging to `main` keeps GitHub and production the same.
+
 ## Operations
 
 ```sh
 fly logs -a attendance-bot-6767                          # live log
-fly deploy --ha=false --remote-only                      # ship code changes
+fly deploy --ha=false --remote-only                      # deploy by hand (pushing code to main also deploys)
 fly secrets set DAILY_AT=20:30 -a attendance-bot-6767    # change a setting (restarts the bot)
 fly scale count 0 -a attendance-bot-6767                 # pause; `count 1` to resume
 fly scale memory 1024 -a attendance-bot-6767             # if Chromium ever runs out of memory
@@ -280,6 +294,7 @@ Dockerfile              Python 3.12 + Playwright Chromium, TZ=Asia/Kolkata
 fly.toml                Fly.io machine, volume and restart policy
 attendance-bot.service  systemd user unit for running the bot on a laptop
 .env.example            configuration template
+.github/workflows/      GitHub Actions: tests on pull requests, tests + deploy on main
 ```
 
 The tests never log in to the portal or message Telegram, and they write only to a temporary folder, so they're safe to run while the bot is up. Their HTML pages are hand-made, not saved from the portal.
