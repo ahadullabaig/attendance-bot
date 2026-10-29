@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["playwright>=1.47", "beautifulsoup4"]
+# dependencies = ["playwright>=1.47", "beautifulsoup4", "requests"]
 # ///
 """Telegram bot for attendance.py: answers /attendance and sends a daily summary.
 
@@ -12,7 +12,6 @@ optionally DAILY_AT=19:00. Run with: uv run bot.py
 import html
 import json
 import os
-import re
 import sys
 import time
 import traceback
@@ -61,11 +60,18 @@ def load_state():
         return json.loads(STATE_FILE.read_text())
     except FileNotFoundError:
         return {"offset": 0}
+    except json.JSONDecodeError:
+        # Losing it only costs the cache and the next daily diff; crashing would loop forever on Fly
+        log("State file unreadable, starting fresh")
+        return {"offset": 0}
 
 
 def save_state(state):
-    STATE_FILE.write_text(json.dumps(state))
-    STATE_FILE.chmod(0o600)
+    # Write a copy and rename it into place, so a restart mid-write can't leave half a file
+    tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(state))
+    tmp.chmod(0o600)
+    tmp.replace(STATE_FILE)
 
 
 def is_fresh(state):
@@ -216,9 +222,10 @@ def send_daily(state):
         send(f"⚠️ Couldn't check attendance for today's summary: {html.escape(str(e))}\nTry /refresh later.")
         return
     diff = changes(state.get("daily_snapshot"), state["data"])
+    send(summary(state, diff))
+    # Only once it's sent: if Telegram was unreachable, today's changes roll into tomorrow's summary
     state["daily_snapshot"] = state["data"]
     save_state(state)
-    send(summary(state, diff))
 
 
 def handle(message, state):
@@ -243,7 +250,7 @@ def handle(message, state):
         except Exception as e:
             log(traceback.format_exc())
             tg("editMessageText", chat_id=CHAT_ID, message_id=note["message_id"],
-               text=f"⚠️ Couldn't check the portal: {html.escape(str(e))}")
+               text=f"⚠️ Couldn't check the portal: {html.escape(str(e))}", parse_mode="HTML")
             return
     text = summary(state)
     if note:
@@ -255,7 +262,9 @@ def handle(message, state):
 def main():
     if not TOKEN:
         sys.exit("Put TELEGRAM_TOKEN=... in .env")
-    if not re.fullmatch(r"\d{1,2}:\d{2}", DAILY_AT):
+    try:
+        datetime.strptime(DAILY_AT, "%H:%M")
+    except ValueError:
         sys.exit("DAILY_AT in .env must look like 19:00")
     attendance.load_credentials()  # fail fast on a broken .env
 
