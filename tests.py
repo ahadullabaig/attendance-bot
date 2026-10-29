@@ -17,9 +17,11 @@ import re
 import tempfile
 import unittest
 import urllib.error
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest import mock
+
+import requests
 
 import attendance
 import bot
@@ -191,6 +193,36 @@ class FetchTest(unittest.TestCase):
                 attendance.fetch_attendance()
         save_session.assert_called_once_with(self.http)
 
+    def test_unreachable_portal_says_so(self):
+        self.http.get.side_effect = requests.ConnectTimeout("timed out")
+        with (mock.patch.object(attendance, "load_session", return_value={"user_agent": "UA", "cookies": []}),
+              mock.patch.object(attendance, "http_session", return_value=self.http)):
+            with self.assertRaisesRegex(attendance.PortalError, "isn't responding"):
+                attendance.fetch_attendance()
+
+
+class LoginTest(unittest.TestCase):
+    def setUp(self):
+        self.page = mock.Mock()
+
+    def login(self):
+        attendance.login(self.page, "1MS00XX000", "2000-01-01", "0000", captcha_timeout=1)
+
+    def test_unreachable_portal_says_so(self):
+        self.page.goto.side_effect = attendance.PWError("net::ERR_CONNECTION_REFUSED")
+        with self.assertRaisesRegex(attendance.PortalError, "isn't responding"):
+            self.login()
+
+    def test_page_without_login_form_is_saved(self):
+        # So the next time the portal serves something odd, there's a page to look at
+        self.page.goto.return_value = mock.Mock(status=503)
+        self.page.locator.return_value.wait_for.side_effect = attendance.PWTimeout("Timeout 10000ms exceeded")
+        with (mock.patch.object(attendance, "dump", return_value="debug/login-page.html") as dump,
+              self.assertRaisesRegex(attendance.PortalError,
+                                     r"HTTP 503 but no login form \(page saved to debug/login-page.html\)")):
+            self.login()
+        dump.assert_called_once_with(self.page, "login-page")
+
 
 class ShortNameTest(unittest.TestCase):
     def test_examples(self):
@@ -283,16 +315,43 @@ class DailySummaryTest(unittest.TestCase):
               mock.patch.object(bot, "send") as send):
             bot.send_daily(self.state)
         self.assertIn("• Operating Systems: +1 present", send.call_args.args[0])
-        self.assertEqual(bot.load_state()["daily_snapshot"], self.new)
+        saved = bot.load_state()
+        self.assertEqual(saved["daily_snapshot"], self.new)
+        self.assertEqual(saved["last_daily"], date.today().isoformat())
 
-    def test_telegram_down_keeps_changes_for_tomorrow(self):
+    def test_telegram_down_retries_with_the_same_changes(self):
         with (mock.patch.object(bot, "refresh", self.fake_refresh),
               mock.patch.object(bot, "send", side_effect=urllib.error.URLError("offline"))):
             with self.assertRaises(urllib.error.URLError):
                 bot.send_daily(self.state)
         saved = bot.load_state()
-        self.assertEqual(saved["last_daily"], date.today().isoformat())  # still not retried all evening
+        self.assertNotIn("last_daily", saved)  # so it's tried again in an hour
         self.assertEqual(saved["daily_snapshot"], self.old)
+
+    def test_portal_down_says_so_once_then_retries_quietly(self):
+        with (mock.patch.object(bot, "refresh", side_effect=attendance.PortalError(attendance.NOT_RESPONDING)),
+              mock.patch.object(bot, "send") as send,
+              mock.patch.object(bot, "log")):
+            bot.send_daily(self.state)
+            bot.send_daily(self.state)  # the retry an hour later
+        send.assert_called_once()
+        self.assertIn("isn&#x27;t responding", send.call_args.args[0])
+        self.assertNotIn("last_daily", bot.load_state())
+
+
+class DailyDueTest(unittest.TestCase):
+    def due(self, **state):
+        with mock.patch.object(bot, "DAILY_AT", "00:00"):  # always past, so only the state decides
+            return bot.daily_due(state)
+
+    def test_due(self):
+        def ago(minutes):
+            return (datetime.now() - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+
+        self.assertTrue(self.due())
+        self.assertFalse(self.due(last_daily=date.today().isoformat()))
+        self.assertFalse(self.due(daily_tried_at=ago(10)))  # failed recently: give the portal an hour
+        self.assertTrue(self.due(daily_tried_at=ago(61)))
 
 
 class HandleTest(unittest.TestCase):
@@ -306,6 +365,20 @@ class HandleTest(unittest.TestCase):
             bot.handle({"chat": {"id": 1234}, "text": "/refresh"}, {"offset": 0})
         self.assertEqual(tg.call_args.args[0], "editMessageText")
         self.assertEqual(tg.call_args.kwargs.get("parse_mode"), "HTML")
+
+    def test_outage_shows_the_last_check(self):
+        state = {"offset": 0, "fetched_at": "2026-10-21T19:00:00",
+                 "data": snapshot(course("CS501", "Operating Systems", 9, 3, 30))}
+        with (mock.patch.object(bot, "CHAT_ID", "1234"),
+              mock.patch.object(bot, "send", return_value={"message_id": 7}),
+              mock.patch.object(bot, "refresh", side_effect=attendance.PortalError(attendance.NOT_RESPONDING)),
+              mock.patch.object(bot, "log"),
+              mock.patch.object(bot, "tg") as tg):
+            bot.handle({"chat": {"id": 1234}, "text": "/refresh"}, state)
+        text = tg.call_args.kwargs["text"]
+        self.assertTrue(text.startswith("⚠️ Couldn't check the portal: parents.msrit.edu isn&#x27;t responding"))
+        self.assertIn("Here's the last successful check.", text)
+        self.assertIn("<pre>", text)
 
     def test_ignores_other_chats(self):
         with (mock.patch.object(bot, "CHAT_ID", "1234"),

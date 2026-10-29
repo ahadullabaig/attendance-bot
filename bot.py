@@ -84,6 +84,17 @@ def refresh(state):
     save_state(state)
 
 
+def log_failure(e):
+    """Log a failed check and return a short reason for the chat. A PortalError already says what went
+    wrong, so one log line will do; anything else is a bug and gets the full traceback."""
+    if isinstance(e, attendance.PortalError):
+        cause = f" ({' '.join(str(e.__cause__).split())})" if e.__cause__ else ""
+        log(f"Portal check failed: {e}{cause}")
+        return html.escape(str(e))
+    log(traceback.format_exc())
+    return html.escape(f"{type(e).__name__}: {e}"[:300])
+
+
 def keep_session_warm(state):
     """A browser login takes over a minute on a small server, while a live session answers in
     ~2s. So keep the portal session alive, and when it's gone, log in again in the background
@@ -106,8 +117,8 @@ def keep_session_warm(state):
             refresh(state)
             state.pop("session_lost_at", None)
         state["next_keepalive"] = (now + KEEPALIVE_EVERY).isoformat(timespec="seconds")
-    except Exception:
-        log(traceback.format_exc())
+    except Exception as e:
+        log_failure(e)
         state["next_keepalive"] = (now + RELOGIN_AFTER).isoformat(timespec="seconds")  # don't hammer it
     save_state(state)
 
@@ -207,24 +218,30 @@ def changes(old, new):
 def daily_due(state):
     now = datetime.now()
     hour, minute = map(int, DAILY_AT.split(":"))
-    return (now >= now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            and state.get("last_daily") != date.today().isoformat())
+    if now < now.replace(hour=hour, minute=minute, second=0, microsecond=0):
+        return False
+    if state.get("last_daily") == date.today().isoformat():
+        return False
+    # After a failed try, give the portal an hour rather than retrying every minute all evening
+    tried = state.get("daily_tried_at")
+    return not tried or now - datetime.fromisoformat(tried) >= RELOGIN_AFTER
 
 
 def send_daily(state):
-    # Mark it done before trying, so a broken portal isn't retried every minute all evening
-    state["last_daily"] = date.today().isoformat()
+    first_try = not state.get("daily_tried_at", "").startswith(date.today().isoformat())
+    state["daily_tried_at"] = datetime.now().isoformat(timespec="seconds")
     save_state(state)
     try:
         refresh(state)
     except Exception as e:
-        log(traceback.format_exc())
-        send(f"⚠️ Couldn't check attendance for today's summary: {html.escape(str(e))}\nTry /refresh later.")
+        reason = log_failure(e)
+        if first_try:  # one notice a day; the summary follows by itself if the portal is back tonight
+            send(f"⚠️ No summary yet: {reason}\nI'll keep trying every hour until midnight.")
         return
     diff = changes(state.get("daily_snapshot"), state["data"])
     send(summary(state, diff))
-    # Only once it's sent: if Telegram was unreachable, today's changes roll into tomorrow's summary
-    state["daily_snapshot"] = state["data"]
+    # Only once it's sent: if Telegram was unreachable, the retry an hour later has the same changes
+    state.update(last_daily=date.today().isoformat(), daily_snapshot=state["data"])
     save_state(state)
 
 
@@ -243,16 +260,18 @@ def handle(message, state):
     # Anything else counts as "show my attendance"
     force = command == "/refresh"
     note = None
+    warning = ""
     if force or not is_fresh(state):
         note = send("⏳ Checking the portal…")
         try:
             refresh(state)
         except Exception as e:
-            log(traceback.format_exc())
-            tg("editMessageText", chat_id=CHAT_ID, message_id=note["message_id"],
-               text=f"⚠️ Couldn't check the portal: {html.escape(str(e))}", parse_mode="HTML")
-            return
-    text = summary(state)
+            warning = f"⚠️ Couldn't check the portal: {log_failure(e)}"
+            if "data" not in state:
+                tg("editMessageText", chat_id=CHAT_ID, message_id=note["message_id"], text=warning, parse_mode="HTML")
+                return
+            warning += "\nHere's the last successful check.\n\n"  # during an outage, old numbers beat none
+    text = warning + summary(state)
     if note:
         tg("editMessageText", chat_id=CHAT_ID, message_id=note["message_id"], text=text, parse_mode="HTML")
     else:

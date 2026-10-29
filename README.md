@@ -21,11 +21,11 @@ It also does the math the portal doesn't: how many classes you can still skip in
 
 | Command | What it does |
 |---|---|
-| `/attendance` (or any message) | Current summary. Served from a cache if the last check is under 3 hours old, since the portal only updates once a day. |
+| `/attendance` (or any message) | Current summary. Served from a cache if the last check is under 3 hours old, since the portal only updates once a day. If the portal is down, you get the last successful check with a warning. |
 | `/refresh` | Checks the portal right now. |
 | `/help` | Lists the commands. |
 
-- **Daily summary** at `DAILY_AT` (default 19:00, local time), with a "Since last summary" section listing new presents and absences.
+- **Daily summary** at `DAILY_AT` (default 19:00, local time), with a "Since last summary" section listing new presents and absences. If the portal is down, it says so once and tries again every hour until midnight.
 - **Only answers you.** Messages from any chat other than `TELEGRAM_CHAT_ID` are ignored and logged.
 - **Keeps the portal session warm**, so answers take seconds instead of a minute-long browser login.
 - **Doesn't fight you for the session.** The portal allows one login at a time. If you or a parent log in by hand, the bot backs off for an hour instead of kicking you out.
@@ -195,6 +195,7 @@ What shows up in the log:
 | `Running as @…, daily summary at 19:00` | Started. |
 | `Portal session ended (someone else logged in?), logging in again in an hour` | Someone logged in elsewhere; the bot is backing off. |
 | `Logging in to the portal again` | The hour is up; logging in in the background. |
+| `Portal check failed: …` | A check didn't work; the rest of the line says why, e.g. the portal isn't responding. |
 | `Ignoring message from chat …` | A stranger messaged the bot. |
 | `Telegram unreachable (…), retrying in 15s` | Network blip. |
 | `Stopping` | Normal shutdown during a deploy or restart. |
@@ -260,12 +261,14 @@ Everything uses integer arithmetic, so there are no floating-point rounding erro
 | Symptom | Cause / fix |
 |---|---|
 | `reCAPTCHA didn't pass` | Google wanted a puzzle. Locally, run `uv run attendance.py --show` and solve it. On a server there's no screen to solve it on, so it would need a code change. So far headless logins have always passed. |
+| `parents.msrit.edu isn't responding` | The portal is down, sometimes for days. Nothing to fix: messages show the last successful check, and the bot logs back in by itself once the portal returns. |
+| `The portal answered with HTTP … but no login form` | The portal is up but served something else: a maintenance notice, an error or block page, or a redesigned login. Fetch the saved screenshot with `fly ssh sftp get /data/debug/login-page.png -a attendance-bot-6767` and compare it with `login()` in `attendance.py`. |
 | `Verification step failed` / `couldn't find the attendance table` | The portal's layout probably changed. The page is saved to `debug/` (`/data/debug` on Fly); compare it with the parser in `attendance.py`. |
 | Bot replies slowly after you used the portal yourself | Expected: your login ended the bot's session, so it had to log in again (about 75 s on Fly). |
 | The laptop CLI keeps logging in | Something else, usually the bot, holds the only session. That's expected, not a bug. |
 | `409 Conflict` / `Telegram unreachable` repeating in the log | Two copies of the bot are polling Telegram. Stop one. |
 | Machine restarts with out-of-memory errors | `fly scale memory 1024`. A login peaks at about 460 MB. |
-| Daily summary didn't arrive | It's sent once per day, at or after `DAILY_AT`. If the portal was down it sends an error instead; use `/refresh`. If Telegram was unreachable, that day's summary is skipped and its changes show up in the next one. |
+| Daily summary didn't arrive | It's sent once per day, at or after `DAILY_AT`. If the portal or Telegram is down, it tries again every hour until midnight, and for the portal it sends one short notice. |
 
 ## Project layout
 
