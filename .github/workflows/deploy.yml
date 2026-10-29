@@ -1,0 +1,36 @@
+# Pull requests run the tests. Pushes to main run them too, then deploy to Fly.io.
+# Pushes that only touch docs or tests don't deploy: that would just restart the bot.
+name: Test and deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths: [attendance.py, bot.py, Dockerfile, .dockerignore, fly.toml, .github/workflows/deploy.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - run: uv run tests.py
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency: deploy  # one deploy at a time; a newer push waits instead of racing it
+    steps:
+      - uses: actions/checkout@v7
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      # --ha=false: otherwise Fly runs two machines, and two bots polling Telegram conflict
+      - run: flyctl deploy --ha=false --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
