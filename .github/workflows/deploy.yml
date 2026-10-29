@@ -19,6 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          cache-dependency-glob: "*.py"  # dependencies are declared inside the scripts (PEP 723)
       - run: uv run tests.py
 
   deploy:
