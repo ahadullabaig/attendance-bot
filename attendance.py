@@ -22,6 +22,7 @@ from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import Error as PWError
 from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
 
@@ -45,6 +46,9 @@ CONDONABLE = 75
 
 class PortalError(Exception):
     """The portal didn't give us what we expected; the message says what and where the page was saved."""
+
+
+NOT_RESPONDING = "parents.msrit.edu isn't responding, so the portal looks down"
 
 
 def load_env():
@@ -86,7 +90,17 @@ def login(page, usn, dob, last4, captcha_timeout):
     yyyy, mm, dd = dob.split("-")
 
     # Step 1: USN + date of birth
-    page.goto(LOGIN_URL)
+    try:
+        response = page.goto(LOGIN_URL)
+    except PWError as e:  # connection refused, or no answer at all
+        raise PortalError(NOT_RESPONDING) from e
+    try:
+        page.locator("#username").wait_for(timeout=10_000)
+    except PWTimeout as e:
+        # It answered with something else: a maintenance notice, an error or block page, or a redesign
+        path = dump(page, "login-page")
+        status = f"HTTP {response.status}" if response else "a page"
+        raise PortalError(f"The portal answered with {status} but no login form (page saved to {path})") from e
     page.fill("#username", usn)
     page.select_option("#dd", label=dd)  # option values carry a trailing space, labels don't
     page.select_option("#mm", value=mm)
@@ -226,6 +240,14 @@ def http_session(user_agent, cookies):
     return http
 
 
+def get(http, url, referer):
+    """GET a portal page. The Referer is required: without one the portal logs you out on the spot."""
+    try:
+        return http.get(url, headers={"Referer": referer}, timeout=(10, 30))  # fail fast when it's down
+    except (requests.ConnectionError, requests.Timeout) as e:
+        raise PortalError(NOT_RESPONDING) from e
+
+
 def load_session():
     try:
         saved = json.loads(SESSION_FILE.read_text())
@@ -246,8 +268,7 @@ def session_alive():
     if not saved:
         return False
     http = http_session(saved["user_agent"], saved["cookies"])
-    resp = http.get(DASHBOARD_URL, headers={"Referer": LOGIN_URL}, timeout=30)
-    return parse_dashboard(resp.text) is not None
+    return parse_dashboard(get(http, DASHBOARD_URL, LOGIN_URL).text) is not None
 
 
 def fetch_attendance(show=False, dump_pages=False):
@@ -260,7 +281,7 @@ def fetch_attendance(show=False, dump_pages=False):
     saved = load_session()
     if saved:
         http = http_session(saved["user_agent"], saved["cookies"])
-        resp = http.get(DASHBOARD_URL, headers={"Referer": LOGIN_URL}, timeout=30)
+        resp = get(http, DASHBOARD_URL, LOGIN_URL)
         dashboard_html, dashboard_url = resp.text, resp.url
         data = parse_dashboard(dashboard_html)
 
@@ -278,7 +299,7 @@ def fetch_attendance(show=False, dump_pages=False):
     for c in data["courses"]:
         if not c["detail_url"]:
             continue
-        resp = http.get(c["detail_url"], headers={"Referer": dashboard_url}, timeout=30)
+        resp = get(http, c["detail_url"], dashboard_url)
         detail = parse_detail(resp.text)
         if detail is None:
             path = save_html(f"attendance-{c['code']}", resp.text)
