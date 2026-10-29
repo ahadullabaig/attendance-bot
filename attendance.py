@@ -271,6 +271,7 @@ def fetch_attendance(show=False, dump_pages=False):
             path = save_html("no-dashboard", dashboard_html)
             raise PortalError(f"Logged in but couldn't find the attendance table. Page saved to {path}")
         http = http_session(user_agent, cookies)
+        save_session(http)  # now, so a bad course page below doesn't cost another browser login
     if dump_pages:
         save_html("dashboard", dashboard_html)
 

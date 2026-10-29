@@ -265,18 +265,21 @@ Everything uses integer arithmetic, so there are no floating-point rounding erro
 | The laptop CLI keeps logging in | Something else, usually the bot, holds the only session. That's expected, not a bug. |
 | `409 Conflict` / `Telegram unreachable` repeating in the log | Two copies of the bot are polling Telegram. Stop one. |
 | Machine restarts with out-of-memory errors | `fly scale memory 1024`. A login peaks at about 460 MB. |
-| Daily summary didn't arrive | It's sent once per day, at or after `DAILY_AT`. If the portal was down it sends an error instead; use `/refresh`. |
+| Daily summary didn't arrive | It's sent once per day, at or after `DAILY_AT`. If the portal was down it sends an error instead; use `/refresh`. If Telegram was unreachable, that day's summary is skipped and its changes show up in the next one. |
 
 ## Project layout
 
 ```
 attendance.py           portal login, page reading, math, CLI
 bot.py                  Telegram bot: commands, daily summary, cache, session keep-alive
+tests.py                offline tests: uv run tests.py
 Dockerfile              Python 3.12 + Playwright Chromium, TZ=Asia/Kolkata
 fly.toml                Fly.io machine, volume and restart policy
 attendance-bot.service  systemd user unit for running the bot on a laptop
 .env.example            configuration template
 ```
+
+The tests never log in to the portal or message Telegram, and they write only to a temporary folder, so they're safe to run while the bot is up. Their HTML pages are hand-made, not saved from the portal.
 
 Git-ignored runtime files (in `DATA_DIR`):
 

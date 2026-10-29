@@ -3,6 +3,7 @@
 .browser-profile/
 debug/
 .bot-state.json
+.bot-state.json.tmp
 __pycache__/
 
 # Personal Claude Code notes
