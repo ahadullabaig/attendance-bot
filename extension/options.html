@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Attendance bot fetcher</title>
+<style>
+  :root { color-scheme: light dark; --ok: #1a7f37; --bad: #cf222e; }
+  @media (prefers-color-scheme: dark) { :root { --ok: #3fb950; --bad: #f85149; } }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; margin-top: 2rem; }
+  label { display: block; margin: .9rem 0 .2rem; font-weight: 600; }
+  label.check { font-weight: normal; }
+  input:not([type=checkbox]) { width: 100%; padding: .4rem; box-sizing: border-box; font: inherit; }
+  button { margin-top: 1rem; padding: .45rem 1rem; font: inherit; }
+  small, .hint { color: GrayText; }
+  .ok { color: var(--ok); }
+  .bad { color: var(--bad); }
+  #status { margin-top: .8rem; }
+  #history { padding-left: 1.2rem; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>Attendance bot fetcher</h1>
+<p>Once a day, this logs in to the MSRIT parents portal in a background tab, reads your
+attendance and sends it to your Telegram bot. It skips a check while you have the portal open,
+since the portal allows one login at a time.</p>
+
+<form id="settings">
+  <label for="token">Bot token</label>
+  <input id="token" type="password" autocomplete="off" required>
+  <small>The PUSH_TOKEN set on the bot.</small>
+  <label for="usn">USN</label>
+  <input id="usn" type="text" autocomplete="off" spellcheck="false" required>
+  <label for="dob">Date of birth</label>
+  <input id="dob" type="date" required>
+  <label for="last4">Last 4 digits of your father's mobile</label>
+  <input id="last4" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" required>
+  <button type="submit">Save</button>
+</form>
+
+<h2>Checks</h2>
+<label class="check"><input id="auto" type="checkbox"> Check automatically</label>
+<small id="auto-hint">Turns on by itself after the first successful Run now.</small>
+<div><button id="run">Run now</button></div>
+<p class="hint">Run now opens the portal in a tab in front of you, so you can watch it log in and
+solve a captcha puzzle if Google shows one.</p>
+<div id="status" role="status"></div>
+
+<h2>Recent checks</h2>
+<p id="none" class="hint">None yet.</p>
+<ol id="history"></ol>
+<script src="options.js"></script>
+</body>
+</html>

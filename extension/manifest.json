@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Attendance bot fetcher",
+  "version": "1.0",
+  "description": "Once a day, logs in to the MSRIT parents portal in this browser and sends your attendance to your Telegram bot.",
+  "permissions": ["alarms", "scripting", "storage", "webNavigation"],
+  "host_permissions": ["https://parents.msrit.edu/*", "https://attendance-bot-6767.fly.dev/*"],
+  "background": {"service_worker": "background.js"},
+  "options_page": "options.html",
+  "action": {"default_title": "Attendance bot: settings and Run now"}
+}

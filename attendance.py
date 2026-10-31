@@ -185,6 +185,15 @@ def parse_detail(html):
     return counts
 
 
+def read_course(c, html):
+    """Add a course's present / absent / still-to-go counts and skip budget from its attendance page."""
+    detail = parse_detail(html)
+    if detail is None:
+        path = save_html(f"attendance-{c['code']}", html)
+        raise PortalError(f"Couldn't read the attendance page for {c['code']}. Page saved to {path}")
+    c.update(detail, can_skip=skip_budget(detail["present"], detail["absent"], detail["remaining"]))
+
+
 def skip_budget(present, absent, remaining):
     """How many of the remaining classes can be missed while still ending the semester at REQUIRED%.
     Negative means the target is out of reach even with full attendance."""
@@ -300,13 +309,9 @@ def fetch_attendance(show=False, dump_pages=False):
         if not c["detail_url"]:
             continue
         resp = get(http, c["detail_url"], dashboard_url)
-        detail = parse_detail(resp.text)
-        if detail is None:
-            path = save_html(f"attendance-{c['code']}", resp.text)
-            raise PortalError(f"Couldn't read the attendance page for {c['code']}. Page saved to {path}")
+        read_course(c, resp.text)
         if dump_pages and not (DEBUG_DIR / "attendance-detail.html").exists():
             save_html("attendance-detail", resp.text)
-        c.update(detail, can_skip=skip_budget(detail["present"], detail["absent"], detail["remaining"]))
 
     save_session(http)
     return data

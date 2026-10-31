@@ -1,6 +1,6 @@
 # MSRIT Attendance Bot
 
-Check your attendance on the [MSRIT parents portal](https://parents.msrit.edu/newparents/index.php) without logging in by hand. A Telegram bot runs 24/7, answers `/attendance` in about two seconds, and sends a summary every evening with what changed since the day before.
+Check your attendance on the [MSRIT parents portal](https://parents.msrit.edu/newparents/index.php) without logging in by hand. A small Chrome extension logs in from your own browser once a day and sends the pages to a Telegram bot. The bot runs 24/7, answers `/attendance` straight away, and sends a summary every evening with what changed since the day before.
 
 It also does the math the portal doesn't: how many classes you can still skip in each course, and how many in a row you need to attend to get back above 85%.
 
@@ -21,14 +21,22 @@ It also does the math the portal doesn't: how many classes you can still skip in
 
 | Command | What it does |
 |---|---|
-| `/attendance` (or any message) | Current summary. Served from a cache if the last check is under 3 hours old, since the portal only updates once a day. If the portal is down, you get the last successful check with a warning. |
-| `/refresh` | Checks the portal right now. |
+| `/attendance` (or any message) | The latest numbers from your laptop. If they're more than a day old, it says so. |
+| `/refresh` | Asks your laptop to check the portal now. With Chrome open, the numbers arrive within a few minutes. |
 | `/help` | Lists the commands. |
 
-- **Daily summary** at `DAILY_AT` (default 19:00, local time), with a "Since last summary" section listing new presents and absences. If the portal is down, it says so once and tries again every hour until midnight.
+- **Daily summary** at `DAILY_AT` (default 19:00, local time), with a "Since last summary" section listing new presents and absences. It waits for that day's numbers. If they haven't arrived three hours later, it says so once, and the summary follows when they do.
 - **Only answers you.** Messages from any chat other than `TELEGRAM_CHAT_ID` are ignored and logged.
-- **Keeps the portal session warm**, so answers take seconds instead of a minute-long browser login.
-- **Doesn't fight you for the session.** The portal allows one login at a time. If you or a parent log in by hand, the bot backs off for an hour instead of kicking you out.
+- **Never contacts the portal itself.** See [How it works](#how-it-works) for why.
+
+**Chrome extension** (`extension/`)
+
+- Asks the bot every 2 minutes whether a check is due. That traffic goes only to the bot.
+- A check is due once a day from 30 minutes before `DAILY_AT` (18:30 by default), and after each `/refresh`. If Chrome isn't open then, the check happens the next time it is.
+- Logs in to the portal in a background tab with your details, reads the dashboard and each course page about a second and a half apart, sends them to the bot and closes the tab.
+- **Doesn't log you out.** The portal allows one login at a time, so the extension skips a check while you have the portal open in Chrome.
+- **Goes easy on the portal.** After a failed check the bot waits an hour and tries once more, then leaves it until the next day. The extension itself never starts automatic checks less than 10 minutes apart, or more than 4 times a day.
+- The first check is always one you start and watch. Automatic checks turn on after it succeeds.
 
 **Command line** (`attendance.py`)
 
@@ -38,6 +46,8 @@ uv run attendance.py --json     # machine-readable
 uv run attendance.py --show     # visible browser, e.g. to solve a captcha puzzle
 uv run attendance.py --dump     # also save raw pages to debug/
 ```
+
+The command line logs in from wherever you run it, by default with a headless browser, which is the kind of client the portal's firewall now bans. Prefer the extension. If you do use the command line, add `--show`.
 
 ### Example message
 
@@ -62,7 +72,7 @@ PP Lab          100    6/6    2
 NoSQL Databases 100    6/6    2
 NLP               –      –    –
 Skip = classes you can still miss and end the semester at 85%
-Portal updated 28 Sep · checked 19:00
+Portal updated 28 Sep · checked 18:31
 ```
 
 Long course names are shortened automatically for the table: `Parallel Programming on GPUs` → `PPG`, `Natural Language Processing Laboratory` → `NLP Lab`. Names that already fit are kept as they are.
@@ -70,65 +80,54 @@ Long course names are shortened automatically for the table: `Parallel Programmi
 ## How it works
 
 ```
-                    only when the session is gone
-                ┌──────────────────────────────────────┐
-                │ Chromium (Playwright)                │
-                │  USN + DOB → invisible reCAPTCHA     │
-                │  → father's mobile, last 4 digits    │
-                └──────────────┬───────────────────────┘
-                               │ cookies + User-Agent
-                               ▼
- Telegram ◄── bot.py ◄── plain HTTP (requests) ──► parents.msrit.edu
-              │  dashboard: course list + %
-              │  one page per course: present / absent / still to go
-              ▼
-         .bot-state.json  (cache, daily snapshot, Telegram offset)
+ your laptop                                     Fly.io
+┌──────────────────────────────┐  GET /due     ┌─────────────────────────┐
+│ Chrome + extension/          │──────────────►│ bot.py                  │
+│  is a check due? if so,      │               │  decides when to check  │
+│  in a background tab:        │  POST /push   │  reads the pages with   │
+│  log in, fetch the dashboard │──────────────►│  attendance.py          │──► Telegram
+│  and each course page        │               │  math, daily summary    │
+└──────────┬───────────────────┘               └─────────────────────────┘
+           │ your own connection,
+           ▼ once a day
+   parents.msrit.edu
 ```
 
-1. **Log in with a real browser, but only when needed.** The login page has an invisible Google reCAPTCHA that runs when the page loads, so logging in needs a real browser. Headless Chromium passes it, both on a laptop and on a Fly.io server.
-2. **Read everything else over plain HTTP.** After login, the session cookie and the browser's User-Agent are saved to `.session.json`. The dashboard and the per-course attendance pages are then fetched with `requests`. On a small server this takes about 2 seconds, against about 75 for a browser login.
-3. **Keep the session alive.** Every 10 minutes the bot loads the dashboard with the saved session. This keeps the session from expiring and shows whether it's still valid.
-4. **Back off when someone else logs in.** If the session is gone, the bot waits an hour before logging in again in the background. A message or the daily summary still logs in straight away if it has to.
+1. **The bot never contacts the portal.** The portal came back from a week-long outage in late October 2026 with a firewall that bans IPs that look like bots. It banned the bot's Fly.io server within the hour. So the logging in moved to your own browser, on your own connection, at the pace of a person clicking through.
+2. **The bot decides, the extension does.** The extension asks `GET /due` every 2 minutes. The bot answers yes once a day and after `/refresh`, and backs off after failures (see [Features](#features)).
+3. **The extension logs in like you would.** It opens the login page, fills in your USN and date of birth, waits for the invisible reCAPTCHA, then picks "Father Mobile" and types the last 4 digits. Your real Chrome profile is what the captcha sees, so it rarely has doubts.
+4. **Only the bot reads pages.** The extension fetches the dashboard and sends it to `POST /push`. The bot answers with the course pages it needs, the extension fetches those and sends them too. Only `attendance.py`'s parsers know what the portal's pages look like.
+5. **Failures come to the chat.** If a check fails, the extension sends the reason and the page it got stuck on to `POST /failed`. The bot saves the page to `DATA_DIR/debug/` and tells you in Telegram.
+
+All three addresses need the `PUSH_TOKEN`, and Fly only serves them over HTTPS.
 
 ### Portal quirks (learned the hard way)
 
 These explain most of the design decisions:
 
-- **Every request needs a `Referer` from the portal.** A request without one, such as typing a URL straight into the address bar, logs the session out on the spot. All requests send `Referer: <portal page>`.
-- **One session per user.** Any new login, whether the bot, the laptop CLI or a person in a browser, ends the previous session immediately.
-- **The session is tied to the browser.** HTTP requests reuse the exact User-Agent of the browser that logged in.
-- **The session cookie has no expiry date**, so browsers drop it when they close. That's why the portal always asks you to log in again. The bot stores the cookie itself.
+- **Every request needs a `Referer` from the portal.** A request without one, such as typing a URL straight into the address bar, logs the session out on the spot. The extension sends one with every page it fetches.
+- **One session per user.** Any new login, whether the extension, the laptop CLI or a person in a browser, ends the previous session immediately.
+- **The firewall bans bot-like clients by IP.** Since October 2026, banned addresses get `Connection refused` while everyone else gets the portal. A headless browser's User-Agent, or a script's, is the likeliest trigger.
+- **The session is tied to the browser.** HTTP requests must reuse the exact User-Agent of the browser that logged in. (The CLI saves it with the cookie.)
+- **The session cookie has no expiry date**, so browsers drop it when they close. That's why the portal always asks you to log in again.
 - **Every page redirects to `index.php?ksign=…`**, an encrypted version of the real URL. The readable URLs (`task=dashboard`, `task=attendencelist&courseId=…`) still work as long as the Referer is present.
-- **The date of birth is sent as `YYYY-MM-DD`**, built from three dropdowns by the page's own `putdate()` function. The day options' values have a trailing space (`'16 '`), so the script selects days by their visible label.
+- **The date of birth is sent as `YYYY-MM-DD`**, built from three dropdowns by the page's own `putdate()` function. The day options' values have a trailing space (`'16 '`), so days are picked by their visible label.
 - **Empty counts mean zero.** A course with no classes recorded shows `Present[]` and `Absent []`; the parser treats these as 0.
-- **An "Attendance rules" popup covers the dashboard** and blocks clicks. The code navigates by URL instead of clicking.
+- **An "Attendance rules" popup covers the dashboard** and blocks clicks. Pages are loaded by URL instead of by clicking.
 
 ## Setup
 
 ### Prerequisites
 
 - [uv](https://docs.astral.sh/uv/). The scripts declare their dependencies inline (PEP 723), so `uv run` installs them.
-- Google Chrome, for running locally. The container uses Playwright's own Chromium instead.
+- Google Chrome on the laptop you use every day, for the extension.
 - A Telegram account, for the bot.
-- The [Fly.io CLI](https://fly.io/docs/flyctl/install/), for running it 24/7.
+- The [Fly.io CLI](https://fly.io/docs/flyctl/install/), for running the bot 24/7.
 
-### 1. Credentials
-
-```sh
-cp .env.example .env
-chmod 600 .env
-```
-
-Fill in `USN`, `DOB` (`YYYY-MM-DD`) and `FATHER_LAST4`. Check that it works:
-
-```sh
-uv run attendance.py
-```
-
-### 2. Telegram bot
+### 1. Telegram bot
 
 1. In Telegram, message **@BotFather**, send `/newbot`, and pick a name and a username ending in `bot`.
-2. Put the token it gives you in `.env` as `TELEGRAM_TOKEN=...`.
+2. `cp .env.example .env && chmod 600 .env`, and put the token BotFather gives you in `.env` as `TELEGRAM_TOKEN=...`.
 3. Send your new bot any message, then find your chat ID:
    ```sh
    curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | python3 -m json.tool | grep -A2 '"chat"'
@@ -136,6 +135,27 @@ uv run attendance.py
 4. Put it in `.env` as `TELEGRAM_CHAT_ID=...`.
 
 If `TELEGRAM_CHAT_ID` isn't set, the bot doesn't answer anyone. It logs the chat ID of whoever messages it, which is another way to find yours.
+
+### 2. Push token
+
+The bot and the extension share a secret. Make one and put it in `.env` as `PUSH_TOKEN=...`:
+
+```sh
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+### 3. Chrome extension
+
+1. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the `extension` folder.
+2. Pin the extension (puzzle-piece icon → pin) and click it to open its settings.
+3. Fill in the push token, your USN, date of birth and the last 4 digits of your father's mobile, and click **Save**. They stay in this Chrome profile only.
+4. Once the bot is running (next section), close any portal tabs and click **Run now**. The portal opens in a tab in front of you, logs in and closes again. When the settings page says it sent your attendance, automatic checks turn on.
+
+**Recent checks** on the settings page lists the last 20 checks and what happened. After you pull a new version of the extension, click the reload icon on its card in `chrome://extensions`.
+
+### 4. Command line (optional)
+
+Fill in `USN`, `DOB` (`YYYY-MM-DD`) and `FATHER_LAST4` in `.env`. Then `uv run attendance.py --show`, but read the warning under [Features](#features) first.
 
 ## Running it
 
@@ -147,7 +167,9 @@ Run the bot in **one place only**. Two copies polling Telegram at the same time 
 uv run bot.py
 ```
 
-To start it automatically when you log in (systemd user service):
+The extension expects the bot at `https://attendance-bot-6767.fly.dev`. To use a local bot instead, change `BOT` at the top of `extension/background.js` to `http://localhost:8080`, add `http://localhost/*` to `host_permissions` in `extension/manifest.json`, and reload the extension.
+
+To start the bot automatically when you log in (systemd user service):
 
 ```sh
 ln -s ~/attendance-bot/attendance-bot.service ~/.config/systemd/user/
@@ -155,31 +177,31 @@ systemctl --user daemon-reload
 systemctl --user enable --now attendance-bot
 ```
 
-It only runs while the laptop is awake. Telegram holds messages for up to 24 hours, so the bot catches up when the laptop wakes.
-
 ### Option B: on Fly.io, 24/7 (current setup)
 
-`fly.toml` describes one shared-cpu-1x machine with 512 MB of RAM and 512 MB of swap, a 1 GB volume at `/data`, and region `sin`. Fly no longer accepts new resources in Mumbai (`bom`), and Singapore reaches the portal in about 0.25 s.
+`fly.toml` describes one shared-cpu-1x machine with 512 MB of RAM, a 1 GB volume at `/data`, region `sin`, and the web server the extension talks to on port 8080 behind HTTPS. Fly no longer accepts new resources in Mumbai (`bom`).
 
 First deploy:
 
 ```sh
 fly auth login
-fly apps create attendance-bot-6767            # app names are global; change it in fly.toml if taken
+fly apps create attendance-bot-6767            # app names are global; change it in fly.toml and background.js if taken
 fly volumes create bot_data --region sin --size 1 --yes
-grep -E '^[A-Z0-9_]+=' .env | fly secrets import --stage
+fly ips allocate-v4 --shared                   # free; gives attendance-bot-6767.fly.dev an address
+fly ips allocate-v6
+grep -E '^(TELEGRAM_|DAILY_AT|PUSH_TOKEN)' .env | fly secrets import --stage
 fly deploy --ha=false --remote-only
 ```
 
 - `--ha=false` keeps it to a single machine. Two machines would both poll Telegram.
 - `--remote-only` builds the image on Fly's builders.
-- The image contains only `attendance.py` and `bot.py`, as enforced by `.dockerignore`. Credentials come from Fly secrets.
+- The image contains only `attendance.py` and `bot.py`, as enforced by `.dockerignore`, and no browser. Secrets come from Fly. The bot doesn't need your portal login; only the extension has it.
 
 Stop any laptop copy afterwards: `systemctl --user disable --now attendance-bot`.
 
 ### Automatic deploys
 
-`.github/workflows/deploy.yml` runs the tests on every pull request. When a push to `main` changes the code, `Dockerfile`, `fly.toml` or the workflow itself, it runs the tests and then deploys. Pushes that only touch docs or tests don't deploy, since that would just restart the bot.
+`.github/workflows/deploy.yml` runs the tests on every pull request. When a push to `main` changes the code, `Dockerfile`, `fly.toml` or the workflow itself, it runs the tests and then deploys. Pushes that only touch docs, tests or the extension don't deploy, since that would just restart the bot.
 
 It deploys with a token that can only deploy this app, stored as the repository secret `FLY_API_TOKEN`. To create or replace it:
 
@@ -198,54 +220,53 @@ fly logs -a attendance-bot-6767                          # live log
 fly deploy --ha=false --remote-only                      # deploy by hand (pushing code to main also deploys)
 fly secrets set DAILY_AT=20:30 -a attendance-bot-6767    # change a setting (restarts the bot)
 fly scale count 0 -a attendance-bot-6767                 # pause; `count 1` to resume
-fly scale memory 1024 -a attendance-bot-6767             # if Chromium ever runs out of memory
 fly ssh console -a attendance-bot-6767                   # shell on the machine
+fly ssh console -a attendance-bot-6767 -C "cat /data/.bot-state.json"     # cache and state
 ```
 
 What shows up in the log:
 
 | Line | Meaning |
 |---|---|
-| `Running as @…, daily summary at 19:00` | Started. |
-| `Portal session ended (someone else logged in?), logging in again in an hour` | Someone logged in elsewhere; the bot is backing off. |
-| `Logging in to the portal again` | The hour is up; logging in in the background. |
-| `Portal check failed: …` | A check didn't work; the rest of the line says why, e.g. the portal isn't responding. |
+| `Running as @…, daily summary at 19:00, listening for the extension on port 8080` | Started. |
+| `Got attendance for 7 courses from the extension` | A check worked. |
+| `The extension's portal check failed: …` | A check didn't work; the rest of the line says why. The chat gets the same message. |
 | `Ignoring message from chat …` | A stranger messaged the bot. |
 | `Telegram unreachable (…), retrying in 15s` | Network blip. |
 | `Stopping` | Normal shutdown during a deploy or restart. |
 
-Useful one-offs on the machine:
-
-```sh
-fly ssh console -a attendance-bot-6767 -C "python attendance.py"          # full fetch, prints the table
-fly ssh console -a attendance-bot-6767 -C "cat /data/.bot-state.json"     # cache and state
-```
-
-**Cost:** about $3–4 a month (small machine plus a 1 GB volume). Check the Fly dashboard's Billing page for the exact figure.
+**Cost:** about $3–4 a month (small machine plus a 1 GB volume; the shared IPv4 address is free). Check the Fly dashboard's Billing page for the exact figure.
 
 ## Configuration
 
 Set these in `.env` locally, or with `fly secrets set` on Fly. Real environment variables take precedence over `.env`.
 
-| Variable | Required | Default | Meaning |
+| Variable | Needed by | Default | Meaning |
 |---|---|---|---|
-| `USN` | yes | – | Portal username, e.g. `1MS24AI000` |
-| `DOB` | yes | – | Date of birth, `YYYY-MM-DD` |
-| `FATHER_LAST4` | yes | – | Last 4 digits of the father's mobile number (the verification step) |
 | `TELEGRAM_TOKEN` | bot | – | From @BotFather |
 | `TELEGRAM_CHAT_ID` | bot | – | The only chat the bot answers |
-| `DAILY_AT` | no | `19:00` | Daily summary time (`HH:MM`, local time; the container is set to `Asia/Kolkata`) |
-| `DATA_DIR` | no | project folder | Where the session, browser profile, bot state and debug pages go (`/data` in the container) |
-| `BROWSER_CHANNEL` | no | `chrome` | Playwright browser channel (`chromium` in the container) |
+| `PUSH_TOKEN` | bot | – | Shared with the extension; at least 20 characters |
+| `DAILY_AT` | – | `19:00` | Daily summary time (`HH:MM`, local time; the container is set to `Asia/Kolkata`). The extension checks the portal 30 minutes before. |
+| `PORT` | – | `8080` | The extension's web server; `fly.toml` expects 8080 |
+| `DATA_DIR` | – | project folder | Where bot state and debug pages go (`/data` in the container) |
+| `USN` | CLI | – | Portal username, e.g. `1MS24AI000` |
+| `DOB` | CLI | – | Date of birth, `YYYY-MM-DD` |
+| `FATHER_LAST4` | CLI | – | Last 4 digits of the father's mobile number (the verification step) |
+| `BROWSER_CHANNEL` | CLI | `chrome` | Playwright browser channel |
+
+The extension keeps its own copy of your portal login, in its settings page.
 
 Tuning constants in the code:
 
 | Constant | File | Value |
 |---|---|---|
 | `REQUIRED` / `CONDONABLE` | `attendance.py` | 85 / 75 (the portal's own rules) |
-| `CACHE_FOR` | `bot.py` | 3 hours |
-| `KEEPALIVE_EVERY` | `bot.py` | 10 minutes |
-| `RELOGIN_AFTER` | `bot.py` | 1 hour, both after losing the session and after a failed login |
+| `FETCH_LEAD` | `bot.py` | 30 minutes before `DAILY_AT` |
+| `RETRY_AFTER` / `MAX_TRIES` | `bot.py` | 1 hour / 2 automatic checks a day |
+| `NOTICE_AFTER` | `bot.py` | 3 hours after `DAILY_AT` |
+| `TICK_MINUTES` | `extension/background.js` | 2 |
+| `MIN_GAP` / `MAX_RUNS_PER_DAY` | `extension/background.js` | 10 minutes / 4 |
+| `PAGE_GAP` | `extension/background.js` | 1.5 seconds between course pages |
 
 ## The math
 
@@ -272,46 +293,52 @@ Everything uses integer arithmetic, so there are no floating-point rounding erro
 
 ## Troubleshooting
 
+The extension's settings page (click its icon) lists recent checks and what happened. Failed checks also arrive in the chat.
+
 | Symptom | Cause / fix |
 |---|---|
-| `reCAPTCHA didn't pass` | Google wanted a puzzle. Locally, run `uv run attendance.py --show` and solve it. On a server there's no screen to solve it on, so it would need a code change. So far headless logins have always passed. |
-| `parents.msrit.edu isn't responding` | The portal is down, sometimes for days. Nothing to fix: messages show the last successful check, and the bot logs back in by itself once the portal returns. |
-| `The portal answered with HTTP … but no login form` | The portal is up but served something else: a maintenance notice, an error or block page, or a redesigned login. Fetch the saved screenshot with `fly ssh sftp get /data/debug/login-page.png -a attendance-bot-6767` and compare it with `login()` in `attendance.py`. |
-| `Verification step failed` / `couldn't find the attendance table` | The portal's layout probably changed. The page is saved to `debug/` (`/data/debug` on Fly); compare it with the parser in `attendance.py`. |
-| Bot replies slowly after you used the portal yourself | Expected: your login ended the bot's session, so it had to log in again (about 75 s on Fly). |
-| The laptop CLI keeps logging in | Something else, usually the bot, holds the only session. That's expected, not a bug. |
+| `No summary yet: your laptop hasn't checked the portal today` | Chrome wasn't open, or automatic checks are off on the settings page. Open Chrome; the summary follows within a few minutes. |
+| `The portal showed the login page again after logging in` | The USN or date of birth in the extension's settings is wrong. |
+| `The verification page came back` | The last 4 digits in the extension's settings are wrong. |
+| `reCAPTCHA didn't pass` | Google wanted a puzzle. Click **Run now**, which shows the tab, and solve it. |
+| `The portal didn't load (net::ERR_CONNECTION_REFUSED)` | The portal is down, or it has blocked your connection. If it opens on your phone's mobile data, it's a block: turn off automatic checks and talk to college IT rather than retrying. |
+| `isn't the dashboard` / `Couldn't read the attendance page` | The portal's layout probably changed. The page is saved on the bot's machine; fetch it with `fly ssh sftp get /data/debug/<file> -a attendance-bot-6767` and compare it with the parser in `attendance.py`. |
+| `The portal is open in a tab` | The extension won't log in while you're using the portal, since that would log you out. Close the tab. |
+| The extension does nothing | Check that automatic checks are on in its settings. For details, open `chrome://extensions`, click **service worker** on its card, and look at the console. |
+| `The bot didn't accept the token` | The push token in the extension's settings doesn't match `PUSH_TOKEN` on the bot. |
 | `409 Conflict` / `Telegram unreachable` repeating in the log | Two copies of the bot are polling Telegram. Stop one. |
-| Machine restarts with out-of-memory errors | `fly scale memory 1024`. A login peaks at about 460 MB. |
-| Daily summary didn't arrive | It's sent once per day, at or after `DAILY_AT`. If the portal or Telegram is down, it tries again every hour until midnight, and for the portal it sends one short notice. |
 
 ## Project layout
 
 ```
-attendance.py           portal login, page reading, math, CLI
-bot.py                  Telegram bot: commands, daily summary, cache, session keep-alive
+attendance.py           portal login for the CLI, page reading, math
+bot.py                  Telegram bot and the extension's web server: commands, schedule, daily summary
+extension/              Chrome extension: logs in from your browser and sends the pages to the bot
 tests.py                offline tests: uv run tests.py
-Dockerfile              Python 3.12 + Playwright Chromium, TZ=Asia/Kolkata
-fly.toml                Fly.io machine, volume and restart policy
+test_extension.py       the extension in Chromium against a fake portal: uv run test_extension.py
+Dockerfile              Python 3.12, no browser, TZ=Asia/Kolkata
+fly.toml                Fly.io machine, volume, web service and restart policy
 attendance-bot.service  systemd user unit for running the bot on a laptop
 .env.example            configuration template
 .github/workflows/      GitHub Actions: tests on pull requests, tests + deploy on main
 ```
 
-The tests never log in to the portal or message Telegram, and they write only to a temporary folder, so they're safe to run while the bot is up. Their HTML pages are hand-made, not saved from the portal.
+Neither test file reaches the portal or Telegram. `tests.py` writes only to a temporary folder and is safe to run while the bot is up. `test_extension.py` runs the real extension and the bot's web server against a fake portal on your machine, and needs Chromium rather than Google Chrome (see its docstring). The test pages are hand-made, not saved from the portal.
 
 Git-ignored runtime files (in `DATA_DIR`):
 
 ```
-.env                 credentials and bot token
-.session.json        portal session cookie + User-Agent
-.browser-profile/    Chromium profile (keeps Google's cookies, which helps the captcha)
-.bot-state.json      Telegram offset, cached data, daily snapshot, keep-alive timers
-debug/               pages saved when parsing fails, or with --dump
+.env                 credentials and tokens
+.bot-state.json      Telegram offset, latest numbers, daily snapshot, check schedule
+debug/               pages saved when reading fails, or with --dump
+.session.json        CLI only: portal session cookie + User-Agent
+.browser-profile/    CLI only: Chromium profile (keeps Google's cookies, which helps the captcha)
 ```
 
 ## Limitations
 
+- **Needs your laptop:** checks only happen while Chrome is open. A day the laptop stays shut gets a notice instead of a summary, and the numbers catch up the next time Chrome opens.
 - **Data freshness:** the portal updates attendance about once a day ("Last Updated On"), so checking more often shows nothing new.
-- **Screen scraping:** the bot reads the portal's pages, so a portal redesign will break parsing until the code is updated.
-- **One session:** the bot and anyone using the portal by hand take turns. The bot is designed to be the one that yields.
-- **Personal use:** keep the check rate low. The keep-alive is one page load every 10 minutes, plus the pages each check reads.
+- **Screen scraping:** the bot reads the portal's pages, so a portal redesign will break the extension's login or the parsing until the code is updated.
+- **One session:** the extension's daily login logs out anyone using the portal at that moment, such as a parent. It does skip while you have the portal open in Chrome.
+- **Personal use:** one login a day from your own browser. Keep it that way.

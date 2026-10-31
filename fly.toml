@@ -1,10 +1,17 @@
 app = "attendance-bot-6767"
 primary_region = "sin"  # Singapore: Fly closed Mumbai (bom) to new resources
-swap_size_mb = 512      # headroom for Chromium on a small machine
 
 [mounts]
   source = "bot_data"
   destination = "/data"
+
+# Where the Chrome extension sends the portal pages (bot.py's web server)
+[http_service]
+  internal_port = 8080
+  force_https = true             # the extension's token must never travel in the clear
+  auto_stop_machines = "off"     # the bot also polls Telegram all day; a stopped machine would miss messages
+  auto_start_machines = true
+  min_machines_running = 1
 
 [[vm]]
   size = "shared-cpu-1x"
