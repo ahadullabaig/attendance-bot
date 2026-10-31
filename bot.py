@@ -46,6 +46,8 @@ NOTICE_AFTER = timedelta(hours=3)   # this long past DAILY_AT without today's nu
 STALE_AFTER = timedelta(days=1)
 MAX_BODY = 10_000_000               # the dashboard plus every course page is well under 1 MB
 SMALL_WORDS = {"and", "of", "on", "the", "for", "in", "to", "with", "&"}
+# Table names picked by hand where the automatic rule doesn't give what I'd call the course
+NICKNAMES = {"NoSQL Databases": "NoSQL"}
 HELP = (
     "/attendance — the latest numbers from your laptop\n"
     "/refresh — ask your laptop to check the portal now (Chrome needs to be open)\n"
@@ -126,7 +128,10 @@ def fetch_due(state, now):
 
 def short_name(name, width=15):
     """Fit course names in the table: 'Parallel Programming on GPUs' -> 'PPG',
-    'Natural Language Processing Laboratory' -> 'NLP Lab'; short names stay as they are."""
+    'Natural Language Processing Laboratory' -> 'NLP Lab'; short names stay as they are,
+    unless NICKNAMES says otherwise."""
+    if name in NICKNAMES:
+        return NICKNAMES[name]
     words = name.split()
     lab = len(words) > 1 and words[-1] in ("Laboratory", "Lab")
     if lab:

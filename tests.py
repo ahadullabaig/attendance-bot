@@ -232,7 +232,8 @@ class ShortNameTest(unittest.TestCase):
         for name, short in {
             "Parallel Programming on GPUs": "PPG",
             "Natural Language Processing Laboratory": "NLP Lab",
-            "NoSQL Databases": "NoSQL Databases",  # already fits
+            "NoSQL Databases": "NoSQL",  # a nickname
+            "Data Mining": "Data Mining",  # already fits
             "Operating Systems": "OS",
             "Biology for Engineers": "BE",
             "Python Lab": "Python Lab",

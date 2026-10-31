@@ -69,13 +69,13 @@ COA              83  10/12    4
 BDC              94  17/18    6
 OS               92  12/13    5
 PP Lab          100    6/6    2
-NoSQL Databases 100    6/6    2
+NoSQL           100    6/6    2
 NLP               –      –    –
 Skip = classes you can still miss and end the semester at 85%
 Portal updated 28 Sep · checked 18:31
 ```
 
-Long course names are shortened automatically for the table: `Parallel Programming on GPUs` → `PPG`, `Natural Language Processing Laboratory` → `NLP Lab`. Names that already fit are kept as they are.
+Long course names are shortened automatically for the table: `Parallel Programming on GPUs` → `PPG`, `Natural Language Processing Laboratory` → `NLP Lab`. Names that already fit are kept as they are, unless `NICKNAMES` in `bot.py` picks one by hand (`NoSQL Databases` → `NoSQL`).
 
 ## How it works
 
