@@ -8,7 +8,7 @@
 Usage:
     uv run attendance.py            # table in the terminal
     uv run attendance.py --json     # machine-readable
-    uv run attendance.py --show     # visible browser, e.g. to solve a captcha puzzle
+    uv run attendance.py --show     # visible browser, to type the security code or solve a captcha puzzle
     uv run attendance.py --dump     # also save raw pages to debug/ for development
 """
 
@@ -86,7 +86,7 @@ def dump(page, name):
     return path
 
 
-def login(page, usn, dob, last4, captcha_timeout):
+def login(page, usn, dob, last4, captcha_timeout, show=False):
     yyyy, mm, dd = dob.split("-")
 
     # Step 1: USN + date of birth
@@ -107,17 +107,29 @@ def login(page, usn, dob, last4, captcha_timeout):
     page.select_option("#yyyy", value=yyyy)
     page.evaluate("putdate()")  # the page builds the hidden passwd field from the dropdowns
 
-    # The invisible reCAPTCHA runs on page load and fills this field when it passes.
-    # If Google wants a puzzle instead, it only shows in a visible browser (--show).
-    try:
-        page.wait_for_function(
-            "document.getElementById('captcha-response').value !== ''",
-            timeout=captcha_timeout * 1000,
-        )
-    except PWTimeout:
-        path = dump(page, "captcha-timeout")
-        raise PortalError(f"reCAPTCHA didn't pass. Run attendance.py --show and solve it. (page saved to {path})")
-    page.click('input[type=submit][value="Login"]')
+    # Since mid-November 2026 the form can also ask for a "Security code", an image of 5 characters.
+    # It's for a person to read, so only a visible browser gets past it: you type it and press Login.
+    code = page.locator("#cs_cap")
+    if code.count() and code.is_visible():
+        if not show:
+            raise PortalError("The login page now asks for a security code. Run attendance.py --show and type it.")
+        code.focus()
+        try:
+            page.wait_for_event("load", timeout=captcha_timeout * 1000)
+        except PWTimeout:
+            raise PortalError("Nobody typed the security code and pressed Login in time.")
+    else:
+        # The invisible reCAPTCHA runs on page load and fills this field when it passes.
+        # If Google wants a puzzle instead, it only shows in a visible browser (--show).
+        try:
+            page.wait_for_function(
+                "document.getElementById('captcha-response').value !== ''",
+                timeout=captcha_timeout * 1000,
+            )
+        except PWTimeout:
+            path = dump(page, "captcha-timeout")
+            raise PortalError(f"reCAPTCHA didn't pass. Run attendance.py --show and solve it. (page saved to {path})")
+        page.click('input[type=submit][value="Login"]')
     page.wait_for_load_state()
 
     # Step 2: verification type + last 4 digits of father's mobile
@@ -235,7 +247,7 @@ def browser_login(show):
         context = p.chromium.launch_persistent_context(PROFILE_DIR, channel=BROWSER_CHANNEL, headless=not show)
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            login(page, usn, dob, last4, captcha_timeout=180 if show else 30)
+            login(page, usn, dob, last4, captcha_timeout=180 if show else 30, show=show)
             return page.content(), page.url, page.evaluate("navigator.userAgent"), context.cookies(BASE)
         finally:
             context.close()

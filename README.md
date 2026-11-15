@@ -22,7 +22,7 @@ It also does the math the portal doesn't: how many classes you can still skip in
 | Command | What it does |
 |---|---|
 | `/attendance` (or any message) | The latest numbers from your laptop. If they're more than a day old, it says so. |
-| `/refresh` | Asks your laptop to check the portal now. With Chrome open, the numbers arrive within a few minutes. |
+| `/refresh` | Asks your laptop to check the portal now. With Chrome open, the numbers arrive within a few minutes. If the portal asks for a security code, you get a message to click **Run now** instead. |
 | `/help` | Lists the commands. |
 
 - **Daily summary** at `DAILY_AT` (default 19:00, local time), with a "Since last summary" section listing new presents and absences. It waits for that day's numbers. If they haven't arrived three hours later, it says so once, and the summary follows when they do.
@@ -34,8 +34,9 @@ It also does the math the portal doesn't: how many classes you can still skip in
 - Asks the bot every 2 minutes whether a check is due. That traffic goes only to the bot.
 - A check is due once a day from 30 minutes before `DAILY_AT` (18:30 by default), and after each `/refresh`. If Chrome isn't open then, the check happens the next time it is.
 - Logs in to the portal in a background tab with your details, reads the dashboard and each course page about a second and a half apart, sends them to the bot and closes the tab.
+- **Leaves the security code to you.** Since mid-November 2026 the login page can ask for a typed image code. An automatic check that meets one stops without filling in or submitting anything, and the bot tells you in Telegram to click **Run now**. Run now fills in your details and puts the cursor in the code box; you type the code and press Login. The extension never reads the code itself.
 - **Doesn't log you out.** The portal allows one login at a time, so the extension skips a check while you have the portal open in Chrome.
-- **Goes easy on the portal.** After a failed check the bot waits an hour and tries once more, then leaves it until the next day. The extension itself never starts automatic checks less than 10 minutes apart, or more than 4 times a day.
+- **Goes easy on the portal.** After a failed check the bot waits an hour and tries once more, then leaves it until the next day. A check stopped by the security code isn't retried that day, since a retry would stop there too. The extension itself never starts automatic checks less than 10 minutes apart, or more than 4 times a day.
 - The first check is always one you start and watch. Automatic checks turn on after it succeeds.
 
 **Command line** (`attendance.py`)
@@ -43,11 +44,11 @@ It also does the math the portal doesn't: how many classes you can still skip in
 ```
 uv run attendance.py            # table in the terminal
 uv run attendance.py --json     # machine-readable
-uv run attendance.py --show     # visible browser, e.g. to solve a captcha puzzle
+uv run attendance.py --show     # visible browser, to type the security code or solve a captcha puzzle
 uv run attendance.py --dump     # also save raw pages to debug/
 ```
 
-The command line logs in from wherever you run it, by default with a headless browser, which is the kind of client the portal's firewall now bans. Prefer the extension. If you do use the command line, add `--show`.
+The command line logs in from wherever you run it, by default with a headless browser, which is the kind of client the portal's firewall now bans. Prefer the extension. If you do use the command line, add `--show`; without it, a login page that asks for the security code stops the run.
 
 ### Example message
 
@@ -95,7 +96,7 @@ Long course names are shortened automatically for the table: `Parallel Programmi
 
 1. **The bot never contacts the portal.** The portal came back from a week-long outage in late October 2026 with a firewall that bans IPs that look like bots. It banned the bot's Fly.io server within the hour. So the logging in moved to your own browser, on your own connection, at the pace of a person clicking through.
 2. **The bot decides, the extension does.** The extension asks `GET /due` every 2 minutes. The bot answers yes once a day and after `/refresh`, and backs off after failures (see [Features](#features)).
-3. **The extension logs in like you would.** It opens the login page, fills in your USN and date of birth, waits for the invisible reCAPTCHA, then picks "Father Mobile" and types the last 4 digits. Your real Chrome profile is what the captcha sees, so it rarely has doubts.
+3. **The extension logs in like you would.** It opens the login page, fills in your USN and date of birth, waits for the invisible reCAPTCHA, then picks "Father Mobile" and types the last 4 digits. Your real Chrome profile is what the captcha sees, so it rarely has doubts. If the login page asks for a security code, only a Run now gets further: you type the code and press Login, and the extension carries on from the next page.
 4. **Only the bot reads pages.** The extension fetches the dashboard and sends it to `POST /push`. The bot answers with the course pages it needs, the extension fetches those and sends them too. Only `attendance.py`'s parsers know what the portal's pages look like.
 5. **Failures come to the chat.** If a check fails, the extension sends the reason and the page it got stuck on to `POST /failed`. The bot saves the page to `DATA_DIR/debug/` and tells you in Telegram.
 
@@ -111,6 +112,7 @@ These explain most of the design decisions:
 - **The session is tied to the browser.** HTTP requests must reuse the exact User-Agent of the browser that logged in. (The CLI saves it with the cookie.)
 - **The session cookie has no expiry date**, so browsers drop it when they close. That's why the portal always asks you to log in again.
 - **Every page redirects to `index.php?ksign=…`**, an encrypted version of the real URL. The readable URLs (`task=dashboard`, `task=attendencelist&courseId=…`) still work as long as the Referer is present.
+- **A typed security code (since mid-November 2026).** Under the date of birth, the login form shows an image of 5 characters with a box (`#cs_cap`) to type them into, as well as the invisible reCAPTCHA. It's there to keep scripts out, so the extension leaves it to you instead of reading it, and never submits the form without it.
 - **The date of birth is sent as `YYYY-MM-DD`**, built from three dropdowns by the page's own `putdate()` function. The day options' values have a trailing space (`'16 '`), so days are picked by their visible label.
 - **Empty counts mean zero.** A course with no classes recorded shows `Present[]` and `Absent []`; the parser treats these as 0.
 - **An "Attendance rules" popup covers the dashboard** and blocks clicks. Pages are loaded by URL instead of by clicking.
@@ -149,7 +151,7 @@ python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 1. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the `extension` folder.
 2. Pin the extension (puzzle-piece icon → pin) and click it to open its settings.
 3. Fill in the push token, your USN, date of birth and the last 4 digits of your father's mobile, and click **Save**. They stay in this Chrome profile only.
-4. Once the bot is running (next section), close any portal tabs and click **Run now**. The portal opens in a tab in front of you, logs in and closes again. When the settings page says it sent your attendance, automatic checks turn on.
+4. Once the bot is running (next section), close any portal tabs and click **Run now**. The portal opens in a tab in front of you and the extension fills in your details. If the page asks for a security code, type it and press Login; the extension does the rest and closes the tab. When the settings page says it sent your attendance, automatic checks turn on.
 
 **Recent checks** on the settings page lists the last 20 checks and what happened. After you pull a new version of the extension, click the reload icon on its card in `chrome://extensions`.
 
@@ -266,6 +268,7 @@ Tuning constants in the code:
 | `NOTICE_AFTER` | `bot.py` | 3 hours after `DAILY_AT` |
 | `TICK_MINUTES` | `extension/background.js` | 2 |
 | `MIN_GAP` / `MAX_RUNS_PER_DAY` | `extension/background.js` | 10 minutes / 4 |
+| `CODE_WAIT` / `RUN_TIMEOUT` | `extension/background.js` | 2 minutes to type the security code / 5 minutes per run |
 | `PAGE_GAP` | `extension/background.js` | 1.5 seconds between course pages |
 
 ## The math
@@ -301,6 +304,8 @@ The extension's settings page (click its icon) lists recent checks and what happ
 | `The portal showed the login page again after logging in` | The USN or date of birth in the extension's settings is wrong. |
 | `The verification page came back` | The last 4 digits in the extension's settings are wrong. |
 | `reCAPTCHA didn't pass` | Google wanted a puzzle. Click **Run now**, which shows the tab, and solve it. |
+| `The portal's login now asks for a security code` | Expected while the portal has the code box. Click **Run now**, type the code in the tab and press Login. Tomorrow's automatic check tries again by itself. |
+| `The portal kept showing the login page` | On a Run now with a security code: the code was mistyped three times, or the USN or date of birth in the settings is wrong. |
 | `The portal didn't load (net::ERR_CONNECTION_REFUSED)` | The portal is down, or it has blocked your connection. If it opens on your phone's mobile data, it's a block: turn off automatic checks and talk to college IT rather than retrying. |
 | `isn't the dashboard` / `Couldn't read the attendance page` | The portal's layout probably changed. The page is saved on the bot's machine; fetch it with `fly ssh sftp get /data/debug/<file> -a attendance-bot-6767` and compare it with the parser in `attendance.py`. |
 | `The portal is open in a tab` | The extension won't log in while you're using the portal, since that would log you out. Close the tab. |
@@ -337,6 +342,7 @@ debug/               pages saved when reading fails, or with --dump
 
 ## Limitations
 
+- **Needs you while the portal asks for a security code:** one Run now a day, with a code to type. The bot reminds you in Telegram.
 - **Needs your laptop:** checks only happen while Chrome is open. A day the laptop stays shut gets a notice instead of a summary, and the numbers catch up the next time Chrome opens.
 - **Data freshness:** the portal updates attendance about once a day ("Last Updated On"), so checking more often shows nothing new.
 - **Screen scraping:** the bot reads the portal's pages, so a portal redesign will break the extension's login or the parsing until the code is updated.

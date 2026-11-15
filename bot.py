@@ -113,6 +113,13 @@ def failures_since(state, when):
     return [t for t in map(datetime.fromisoformat, state.get("fetch_failed", [])) if t >= when]
 
 
+def needs_you_since(state, when):
+    """Whether a check since then stopped at something only you can do, like the login page's
+    security code, which an automatic retry would stop at too."""
+    stopped = state.get("needs_you")
+    return bool(stopped) and datetime.fromisoformat(stopped) >= when
+
+
 def fetch_due(state, now):
     """Whether the extension should check the portal now. The portal updates once a day, so one
     check a day is enough, plus one for each /refresh. After a failure, wait an hour and try once
@@ -120,7 +127,7 @@ def fetch_due(state, now):
     if state.get("refresh_wanted"):
         return True
     since = fetch_time(now)
-    if checked_since(state, since):
+    if checked_since(state, since) or needs_you_since(state, since):
         return False
     failed = failures_since(state, since)
     return len(failed) < MAX_TRIES and (not failed or now - max(failed) >= RETRY_AFTER)
@@ -241,8 +248,13 @@ def send_daily(state, now):
     elif now >= at_time(DAILY_AT, now) + NOTICE_AFTER and state.get("daily_notice") != today:
         last = (f"Its last check was {pretty_time(datetime.fromisoformat(state['fetched_at']))}."
                 if state.get("fetched_at") else "It hasn't sent any numbers yet.")
-        send(f"⚠️ No summary yet: your laptop hasn't checked the portal since {fetch_time(now):%H:%M}. {last}\n"
-             "The summary comes as soon as it does (Chrome needs to be open). /attendance shows the last numbers.")
+        if needs_you_since(state, fetch_time(now)):
+            send("⚠️ No summary yet: the portal's login wants a security code, which your laptop can't type. "
+                 f"{last}\nClick Run now in the extension and type the code; the summary follows. "
+                 "/attendance shows the last numbers.")
+        else:
+            send(f"⚠️ No summary yet: your laptop hasn't checked the portal since {fetch_time(now):%H:%M}. {last}\n"
+                 "The summary comes as soon as it does (Chrome needs to be open). /attendance shows the last numbers.")
         state["daily_notice"] = today
         save_state(state)
 
@@ -257,14 +269,18 @@ def notify(text):
         log(f"Couldn't message Telegram ({e})")
 
 
-def fetch_failed(state, reason):
+def fetch_failed(state, reason, needs_you=False):
     """Record a failed check, so fetch_due() backs off, and say what went wrong."""
     now = datetime.now()
     state["fetch_failed"] = [*state.get("fetch_failed", [])[-9:], now.isoformat(timespec="seconds")]
+    if needs_you:
+        state["needs_you"] = now.isoformat(timespec="seconds")
     asked = state.pop("refresh_wanted", None)  # one try per /refresh
     save_state(state)
     log(f"The extension's portal check failed: {reason}")
-    if asked:
+    if needs_you:
+        then = ""  # the reason says what to do; no automatic retry today, it would stop there too
+    elif asked:
         then = "\nSend /refresh to try again."
     elif checked_since(state, fetch_time(now)):
         then = ""  # a manual run on top of today's check; today's numbers are already in
@@ -279,6 +295,7 @@ def accept(state, data):
     now = datetime.now()
     state.update(data=data, fetched_at=now.isoformat(timespec="seconds"))
     state.pop("fetch_failed", None)
+    state.pop("needs_you", None)
     asked = state.pop("refresh_wanted", None)
     save_state(state)
     log(f"Got attendance for {len(data['courses'])} courses from the extension")
@@ -326,7 +343,7 @@ def on_failed(state, body):
     reason = " ".join(str(body.get("error") or "unknown error").split())[:300]
     if isinstance(body.get("html"), str):
         reason += f" (page saved to {attendance.save_html('extension-failed', body['html'])})"
-    fetch_failed(state, reason)
+    fetch_failed(state, reason, needs_you=body.get("needs_you") is True)
     return {"ok": True}
 
 

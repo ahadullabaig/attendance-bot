@@ -4,8 +4,8 @@
 # dependencies = ["playwright>=1.47", "beautifulsoup4", "requests"]
 # ///
 """End-to-end test of the Chrome extension: the real extension in Chromium, the bot's real web
-server, and a fake portal that behaves like the real one (invisible captcha, verification step,
-Referer rule). Nothing here reaches the real portal or Telegram.
+server, and a fake portal that behaves like the real one (invisible captcha, optional security code,
+verification step, Referer rule). Nothing here reaches the real portal or Telegram.
 
     uv run test_extension.py
 
@@ -15,10 +15,12 @@ own Chromium (install it with: uv run --with playwright python -m playwright ins
 
 import os
 import shutil
+import json
 import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,6 +47,7 @@ LOGIN_PAGE = """<html><body>
   <select id="yyyy">{years}</select>
   <input type="hidden" id="passwd" name="passwd">
   <input type="hidden" id="captcha-response" name="captcha">
+  <!--CODE-->
   <input type="submit" value="Login">
 </form>
 <script>
@@ -79,9 +82,17 @@ class FakePortal(BaseHTTPRequestHandler):
 
     requests = []  # (method, path, referer)
     captcha_ms = 800
+    code = None  # the security code to ask for, like the real login page since November 2026
+    code_after_ms = 0  # or have the page's script add the box this long after loading
 
     def login_page(self, headers=()):
-        self.page(LOGIN_PAGE.replace("CAPTCHA_MS", str(self.captcha_ms)), headers=headers)
+        box = ('<img alt="Security code" src="data:,">'
+               '<input id="cs_cap" name="cs_cap" placeholder="Type the 5 characters above">') if self.code else ""
+        if box and self.code_after_ms:
+            box = ("<script>setTimeout(function () { document.querySelector('input[type=submit]')"
+                   f".insertAdjacentHTML('beforebegin', {json.dumps(box)}); }}, {self.code_after_ms});</script>")
+        self.page(LOGIN_PAGE.replace("CAPTCHA_MS", str(self.captcha_ms)).replace("<!--CODE-->", box),
+                  headers=headers)
 
     def log_message(self, *args):
         pass
@@ -123,7 +134,8 @@ class FakePortal(BaseHTTPRequestHandler):
             if self.cookies().get("stage") == "verify" and form.get("type") == "F" and digits == LAST4:
                 return self.page("", 302, [("Location", "index.php?ksign=abc"), ("Set-Cookie", "session=good")])
             return self.page(VERIFY_PAGE)
-        if form.get("username") == USN and form.get("passwd") == DOB and form.get("captcha"):
+        right_code = not self.code or form.get("cs_cap") == self.code
+        if form.get("username") == USN and form.get("passwd") == DOB and form.get("captcha") and right_code:
             return self.page(VERIFY_PAGE, headers=[("Set-Cookie", "stage=verify")])
         self.login_page()
 
@@ -279,6 +291,58 @@ class ExtensionTest(unittest.TestCase):
             result = self.js("runNow()")
         self.assertFalse(result["ok"])
         self.assertIn("ERR_CONNECTION_REFUSED", result["message"])
+        self.assertEqual(self.portal_tabs(), 0)
+
+    def test_8_security_code_stops_an_automatic_check_before_submitting(self):
+        # Nobody is there to type it, and submitting without it is a failed login from your connection.
+        # The box may also come from the page's script after the extension's first look.
+        for after_ms, captcha_ms in ((0, 800), (3000, 4000)):
+            with self.subTest(code_after_ms=after_ms):
+                FakePortal.requests.clear()
+                self.sent.clear()
+                FakePortal.code, FakePortal.code_after_ms, FakePortal.captcha_ms = "K7Q2P", after_ms, captcha_ms
+                self.state["refresh_wanted"] = "2026-11-15T13:00:00"
+                self.js("chrome.storage.local.set({runs: []})")
+                try:
+                    self.js("tick()")
+                finally:
+                    FakePortal.code, FakePortal.code_after_ms, FakePortal.captcha_ms = None, 0, 800
+                self.assertEqual([method for method, _, _ in FakePortal.requests], ["GET"])  # looked, didn't submit
+                history = self.js("(await chrome.storage.local.get()).history")
+                self.assertEqual((history[0]["mode"], history[0]["ok"]), ("auto", False))
+                self.assertIn("security code", history[0]["message"])
+                self.assertIn("needs_you", self.state)
+                self.assertTrue(any("security code" in text and "Run now" in text for text in self.sent), self.sent)
+                self.assertFalse(any("try again" in text for text in self.sent), self.sent)
+                # Typed values aren't in the saved page, whether or not the form got filled in
+                self.assertNotIn(USN, (attendance.DEBUG_DIR / "extension-failed.html").read_text())
+                self.assertEqual(self.portal_tabs(), 0)
+
+    def test_9_security_code_typed_by_you_on_a_manual_run_even_after_a_typo(self):
+        FakePortal.code = "K7Q2P"
+        try:
+            with self.browser.expect_page() as opened:
+                self.js("(globalThis.manual = null, runNow().then((r) => { globalThis.manual = r; }), null)")
+            page = opened.value
+            for typed in ("K7Q2B", "K7Q2P"):  # a typo first: the login page comes back for another go
+                # The extension fills in your details and leaves the cursor in the code box for you
+                page.wait_for_function("document.getElementById('username').value !== ''"
+                                       " && document.activeElement && document.activeElement.id === 'cs_cap'")
+                page.wait_for_function("document.getElementById('captcha-response').value !== ''")
+                page.fill("#cs_cap", typed)
+                with page.expect_navigation():
+                    page.click("input[type=submit]")
+            for _ in range(150):
+                result = self.js("globalThis.manual")
+                if result:
+                    break
+                time.sleep(0.2)
+        finally:
+            FakePortal.code = None
+        self.assertEqual(result, {"ok": True, "message": "Sent attendance for 2 courses to the bot."})
+        logins = [path for method, path, _ in FakePortal.requests if method == "POST" and "verify" not in path]
+        self.assertEqual(len(logins), 2)  # both submitted by you, none by the extension
+        self.assertNotIn("needs_you", self.state)
         self.assertEqual(self.portal_tabs(), 0)
 
 

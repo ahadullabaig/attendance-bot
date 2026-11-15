@@ -32,7 +32,7 @@ $("auto").addEventListener("change", () => chrome.storage.local.set({auto: $("au
 
 $("run").addEventListener("click", async () => {
   $("run").disabled = true;
-  showStatus(null, "Checking the portal… (up to 3 minutes)");
+  showStatus(null, "Checking the portal… If it asks for a security code, type it in the tab and press Login.");
   try {
     const result = await chrome.runtime.sendMessage("run-now");
     showStatus(result.ok, result.message);

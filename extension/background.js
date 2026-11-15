@@ -10,10 +10,13 @@ const BOT = "https://attendance-bot-6767.fly.dev";
 const TICK_MINUTES = 2; // how often to ask the bot whether a check is due
 const MIN_GAP = 10 * 60_000; // automatic runs never start closer together than this,
 const MAX_RUNS_PER_DAY = 4; // or more often than this, whatever the bot says
-const RUN_TIMEOUT = 3 * 60_000;
+const RUN_TIMEOUT = 5 * 60_000; // room for a manual run where you retype a mistyped security code
 const PAGE_GAP = 1500; // between course pages, like someone clicking through them
 // A manual run's tab is in front of you, so there's time to solve a captcha puzzle if Google shows one
 const CAPTCHA_WAIT = {auto: 30_000, manual: 120_000};
+const CODE_WAIT = 120_000; // for you to type the login page's security code and press Login
+const NEEDS_YOU = "The portal's login now asks for a security code, which only you can type. "
+  + "Click Run now in the extension, type the code in the tab and press Login.";
 const DAY = 24 * 3600_000;
 
 chrome.runtime.onInstalled.addListener(schedule);
@@ -121,11 +124,11 @@ async function run(s, due, mode) {
     nav.tabId = tab.id;
     await chrome.storage.session.set({running: {at: Date.now(), tabId: tab.id}});
     try {
-      const courses = await withTimeout(drive(nav, s, due, CAPTCHA_WAIT[mode]), RUN_TIMEOUT,
-        "The check took over 3 minutes");
+      const courses = await withTimeout(drive(nav, s, due, mode), RUN_TIMEOUT,
+        `The check took over ${RUN_TIMEOUT / 60_000} minutes`);
       return note(mode, true, `Sent attendance for ${courses} courses to the bot.`);
     } catch (error) {
-      if (!error.reported) await report(s.token, nav, error.message);
+      if (!error.reported) await report(s.token, nav, error);
       return note(mode, false, error.message);
     } finally {
       await chrome.tabs.remove(tab.id).catch(() => {});
@@ -139,23 +142,54 @@ async function run(s, due, mode) {
   }
 }
 
-async function drive(nav, s, due, captchaWait) {
+// How often each page may come up in one run before it's taken as wrong details, and what to say.
+// The security code page may come back after a mistyped code, and you're there to retype it.
+const AGAIN = {
+  login: [1, "The portal showed the login page again after logging in. Check the USN and date of birth."],
+  code: [3, "The portal kept showing the login page. Check the security code as you type it, and the USN"
+    + " and date of birth in the settings."],
+  verify: [1, "The verification page came back. Check the last 4 digits of your father's mobile."],
+};
+
+// You type the security code and press Login; the page unloading is the sign you did
+function waitForYou(next) {
+  return withTimeout(next.loaded, CODE_WAIT,
+    `Nobody typed the security code and pressed Login within ${CODE_WAIT / 60_000} minutes`);
+}
+
+async function drive(nav, s, due, mode) {
   await firstLoad(nav);
-  const seen = new Set();
-  for (let step = 0; step < 4; step++) {
+  const seen = {};
+  for (let step = 0; step < 6; step++) {
     await sleep(1000); // let any redirect by script finish before looking at the page
     const page = await inTab(nav, probe);
     if (page === "other") return collect(nav, s.token, due);
-    if (seen.has(page)) {
-      throw new Error(page === "login"
-        ? "The portal showed the login page again after logging in. Check the USN and date of birth."
-        : "The verification page came back. Check the last 4 digits of your father's mobile.");
+    if (page === "code" && mode === "auto") {
+      // Nobody is watching an automatic run, so it stops here without filling in or submitting anything
+      throw Object.assign(new Error(NEEDS_YOU), {needsYou: true});
     }
-    seen.add(page);
+    seen[page] = (seen[page] || 0) + 1;
+    if (seen[page] > AGAIN[page][0]) throw new Error(AGAIN[page][1]);
     const next = nextLoad(nav); // listening before the click, so the new page can't slip past
     try {
-      if (page === "login") await inTab(nav, fillLogin, [s.usn, s.dob, captchaWait]);
-      else await inTab(nav, fillVerification, [s.last4]);
+      if (page === "login") {
+        // fillLogin looks for the code box again just before clicking Login, in case the page's
+        // script only added it after probe() looked
+        const late = await inTab(nav, fillLogin, [s.usn, s.dob, CAPTCHA_WAIT[mode], true]);
+        if (late && late.code) {
+          if (mode === "auto") throw Object.assign(new Error(NEEDS_YOU), {needsYou: true});
+          seen.login -= 1; // it was the code page all along
+          seen.code = (seen.code || 0) + 1;
+          await waitForYou(next);
+          continue;
+        }
+      } else if (page === "code") {
+        await inTab(nav, fillLogin, [s.usn, s.dob, 0, false]);
+        await waitForYou(next);
+        continue;
+      } else {
+        await inTab(nav, fillVerification, [s.last4]);
+      }
       // The clock starts after filling in, which includes waiting for the captcha
       await withTimeout(next.loaded, 30_000, `Nothing happened after submitting the ${page} page`);
     } finally {
@@ -181,14 +215,16 @@ async function collect(nav, token, due) {
   return reply.courses;
 }
 
-async function report(token, nav, message) {
+async function report(token, nav, error) {
   let page = {};
   try {
     page = await inTab(nav, () => ({url: location.href, html: document.documentElement.outerHTML}));
   } catch {
     // an error page or a closed tab: send the message alone
   }
-  await callBot(token, "/failed", {error: message, ...page}).catch(() => {});
+  // needs_you tells the bot an automatic retry would stop at the same place
+  const body = {error: error.message, needs_you: Boolean(error.needsYou), ...page};
+  await callBot(token, "/failed", body).catch(() => {});
 }
 
 async function note(mode, ok, message) {
@@ -261,14 +297,25 @@ async function inTab(nav, func, args = []) {
 function probe() {
   const shown = (el) => el.getClientRects().length > 0;
   if (document.querySelector('input#username') && document.querySelector('input[type=submit][value="Login"]')) {
-    return "login";
+    // Since mid-November 2026 the form can also have a "Security code": an image of 5 characters
+    // for a person to read and type
+    const code = document.getElementById("cs_cap");
+    return code && shown(code) ? "code" : "login";
   }
   const select = [...document.querySelectorAll("select")].find(shown);
   if (select && [...select.options].some((o) => /father/i.test(o.text))) return "verify";
   return "other";
 }
 
-async function fillLogin(usn, dob, captchaWait) {
+async function fillLogin(usn, dob, captchaWait, submit) {
+  const shown = (el) => el.getClientRects().length > 0;
+  const codeBox = () => {
+    const code = document.getElementById("cs_cap");
+    if (!code || !shown(code)) return false;
+    code.scrollIntoView({block: "center"});
+    code.focus();
+    return true;
+  };
   const set = (el, value) => {
     el.value = value;
     for (const type of ["input", "change"]) el.dispatchEvent(new Event(type, {bubbles: true}));
@@ -287,6 +334,12 @@ async function fillLogin(usn, dob, captchaWait) {
     pick("mm", (o) => o.value === mm);
     pick("yyyy", (o) => o.value === yyyy);
     if (typeof putdate === "function") putdate(); // the page builds its hidden password field from the lists
+    if (!submit) {
+      // Waiting here for you to log in would break: the page, and this function with it, unloads when
+      // you press Login. So it just puts the cursor in the code box and the extension waits outside.
+      if (!codeBox()) throw new Error("The login page's security code box went away");
+      return null;
+    }
     // The invisible reCAPTCHA runs on page load and fills this field when it passes
     const captcha = document.getElementById("captcha-response");
     if (!captcha) throw new Error("The login page has no captcha field; the portal may have been redesigned");
@@ -296,6 +349,7 @@ async function fillLogin(usn, dob, captchaWait) {
     }
     const button = document.querySelector('input[type=submit][value="Login"]');
     if (!button) throw new Error("The login page has no Login button");
+    if (codeBox()) return {code: true}; // never submit without the code; the extension decides what next
     setTimeout(() => button.click(), 100); // after this has returned, since the click leaves the page
     return null;
   } catch (error) {

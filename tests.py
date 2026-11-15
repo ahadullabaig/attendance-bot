@@ -226,6 +226,14 @@ class LoginTest(unittest.TestCase):
             self.login()
         dump.assert_called_once_with(self.page, "login-page")
 
+    def test_security_code_stops_a_headless_login_before_submitting(self):
+        # The code is for a person to read; a script that guessed at it would look like a bot
+        self.page.locator.return_value.count.return_value = 1
+        self.page.locator.return_value.is_visible.return_value = True
+        with self.assertRaisesRegex(attendance.PortalError, "security code. Run attendance.py --show"):
+            self.login()
+        self.page.click.assert_not_called()
+
 
 class ShortNameTest(unittest.TestCase):
     def test_examples(self):
@@ -354,6 +362,15 @@ class FetchDueTest(BotTestCase):
         self.assertFalse(self.due(self.at("23:00"), fetched_at=stale, fetch_failed=twice))
         self.assertTrue(self.due(self.at("18:30", 1), fetched_at=stale, fetch_failed=twice))  # a new day
 
+    def test_security_code_means_no_more_automatic_tries_today(self):
+        # A retry would stop at the same code box, so only your Run now can log in today
+        stale, stopped = iso(self.at("18:40", -1)), iso(self.at("18:30"))
+        failed = [stopped]
+        self.assertFalse(self.due(self.at("19:30"), fetched_at=stale, fetch_failed=failed, needs_you=stopped))
+        self.assertTrue(self.due(self.at("20:00"), fetched_at=stale, fetch_failed=failed, needs_you=stopped,
+                                 refresh_wanted=iso(self.at("19:59"))))
+        self.assertTrue(self.due(self.at("18:30", 1), fetched_at=stale, fetch_failed=failed, needs_you=stopped))
+
 
 class DailySummaryTest(BotTestCase):
     def setUp(self):
@@ -381,6 +398,14 @@ class DailySummaryTest(BotTestCase):
         send.assert_called_once()
         self.assertIn("hasn't checked the portal since 18:30", send.call_args.args[0])
         self.assertTrue(bot.daily_due(state, self.at("22:10")))  # the summary still comes with the numbers
+
+    def test_notice_says_when_the_security_code_is_why(self):
+        state = {"offset": 0, "daily_snapshot": self.old, "data": self.old, "fetched_at": iso(self.at("18:35", -1)),
+                 "needs_you": iso(self.at("18:30"))}
+        with mock.patch.object(bot, "send") as send:
+            bot.send_daily(state, self.at("22:00"))
+        self.assertIn("wants a security code", send.call_args.args[0])
+        self.assertIn("Run now", send.call_args.args[0])
 
     def test_telegram_down_retries_with_the_same_changes(self):
         state = {"offset": 0, "daily_snapshot": self.old, "data": self.new, "fetched_at": iso(self.at("18:35"))}
@@ -451,6 +476,24 @@ class PushTest(BotTestCase):
         self.assertIn("reCAPTCHA didn&#x27;t pass", message)
         self.assertIn("try again in an hour", message)
         self.assertEqual(len(bot.load_state()["fetch_failed"]), 1)
+
+    def test_security_code_report_says_what_to_do_and_doesnt_promise_a_retry(self):
+        state = {"offset": 0}
+        bot.on_failed(state, {"error": "The portal's login now asks for a security code. Click Run now.",
+                              "needs_you": True, "url": "x", "html": "<html>login</html>"})
+        message = bot.send.call_args.args[0]
+        self.assertIn("security code", message)
+        self.assertNotIn("try again", message)
+        self.assertNotIn("No more automatic tries", message)
+        self.assertIn("needs_you", bot.load_state())
+        # Your Run now gets the numbers, and tomorrow's automatic check goes ahead as usual
+        bot.on_push(state, {"dashboard": DASHBOARD, "pages": {COURSE_PAGE: DETAIL}})
+        self.assertNotIn("needs_you", state)
+
+    def test_only_a_real_true_counts_as_needs_you(self):
+        state = {"offset": 0}
+        bot.on_failed(state, {"error": "reCAPTCHA didn't pass", "needs_you": "false"})
+        self.assertNotIn("needs_you", state)
 
     def test_bot_never_contacts_the_portal(self):
         # The portal's firewall banned the bot's server: only the extension, in your browser, logs in
