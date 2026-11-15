@@ -26,6 +26,7 @@ It also does the math the portal doesn't: how many classes you can still skip in
 | `/help` | Lists the commands. |
 
 - **Daily reminder** 30 minutes before `DAILY_AT` (18:30 by default) to log in to the portal, unless that day's numbers are already in.
+- **Summary on demand:** a click on the extension's icon, or `/refresh`, gets you the summary as soon as the read works. Automatic reads wait for the daily summary.
 - **Daily summary** at `DAILY_AT` (default 19:00, local time), with a "Since last summary" section listing new presents and absences. It waits for that day's numbers. If they haven't arrived three hours later, it says so once, and the summary follows when they do.
 - **Only answers you.** Messages from any chat other than `TELEGRAM_CHAT_ID` are ignored and logged.
 - **Never contacts the portal itself.** See [How it works](#how-it-works) for why.
@@ -35,7 +36,7 @@ It also does the math the portal doesn't: how many classes you can still skip in
 - **Never logs in.** You log in to the portal yourself, in a normal tab: USN, date of birth, security code, verification. The extension doesn't fill in, click or submit anything on the portal, doesn't open or close tabs, and doesn't keep your portal login.
 - **Reads once you're in.** When a page of this term's portal (`/newparents/`, past the login) finishes loading, it asks the bot whether a read is due. If so, it fetches the dashboard and each course page from your session, about a second and a half apart, and sends them to the bot. The icon shows … while it reads and ✓ once it's sent, so stay on the page for those few seconds.
 - A read is due once a day from 30 minutes before `DAILY_AT` (18:30 by default), and after each `/refresh`.
-- **Click the icon to send now.** On a portal page, clicking the extension's icon reads straight away, due or not. Anywhere else it opens the settings.
+- **Click the icon to send now.** On a portal page, clicking the extension's icon reads straight away, due or not, and the bot sends you the summary as soon as the read works. Anywhere else it opens the settings.
 - **Stands down after a failure.** If an automatic read fails, automatic reads pause, so a broken portal page doesn't trigger a read on every page you open. The next read that works, such as a click on the icon, ends the pause. Leaving the page mid-read isn't a failure; the next portal page tries again.
 - **One read at a time.** It waits a second for a page that redirects by script, and two portal tabs loading together start one read, not two.
 

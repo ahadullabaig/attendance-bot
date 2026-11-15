@@ -286,7 +286,9 @@ def fetch_failed(state, reason):
     notify(f"⚠️ Couldn't read your attendance from the portal: {html.escape(reason)}{then}")
 
 
-def accept(state, data):
+def accept(state, data, manual=False):
+    """Store a successful read. The summary goes out if the daily one is due, or if you asked for
+    these numbers: with /refresh, or by clicking the extension's icon (manual)."""
     now = datetime.now()
     state.update(data=data, fetched_at=now.isoformat(timespec="seconds"))
     state.pop("fetch_failed", None)
@@ -297,8 +299,8 @@ def accept(state, data):
         return
     try:
         if daily_due(state, now):
-            send_daily(state, now)  # also answers a /refresh
-        elif asked:
+            send_daily(state, now)  # also answers a /refresh or a click
+        elif asked or manual:
             send(summary(state))
     except Exception as e:
         log(f"Couldn't message Telegram ({e}); the daily summary will retry")
@@ -332,7 +334,7 @@ def on_push(state, body):
     except attendance.PortalError as e:
         fetch_failed(state, str(e))
         return {"done": False, "error": str(e)}
-    accept(state, data)
+    accept(state, data, manual=body.get("manual") is True)
     return {"done": True, "courses": len(data["courses"])}
 
 

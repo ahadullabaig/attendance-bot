@@ -438,6 +438,10 @@ class PushTest(BotTestCase):
         self.assertEqual(bot.load_state()["data"], state["data"])
         bot.send.assert_not_called()  # nobody asked, and the daily summary isn't due
 
+    def test_a_click_on_the_icon_gets_the_summary_straight_away(self):
+        bot.on_push({"offset": 0}, {"dashboard": DASHBOARD, "pages": {COURSE_PAGE: DETAIL}, "manual": True})
+        self.assertIn("<pre>", bot.send.call_args.args[0])
+
     def test_answers_a_refresh(self):
         state = {"offset": 0, "refresh_wanted": iso(self.at("10:00"))}
         bot.on_push(state, {"dashboard": DASHBOARD, "pages": {COURSE_PAGE: DETAIL}})

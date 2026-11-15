@@ -102,7 +102,7 @@ async function read(s, due, tabId, mode) {
   const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
   badge(tabId, "…", "Reading your attendance: stay on this page for a few seconds");
   try {
-    const courses = await withTimeout(collect(tabId, s.token, due), RUN_TIMEOUT,
+    const courses = await withTimeout(collect(tabId, s.token, due, mode), RUN_TIMEOUT,
       `The read took over ${RUN_TIMEOUT / 60_000} minutes`);
     badge(tabId, "✓", `Sent attendance for ${courses} courses to the bot`);
     await chrome.storage.local.remove("paused"); // it works again, so automatic reads resume
@@ -127,13 +127,15 @@ async function read(s, due, tabId, mode) {
   }
 }
 
-async function collect(tabId, token, due) {
+async function collect(tabId, token, due, mode) {
   const first = await inTab(tabId, fetchPages, [[due.dashboard_url], due.referrer, 0]);
   const dashboard = first.pages[due.dashboard_url];
-  let reply = await callBot(token, "/push", {dashboard});
+  // A click on the icon asks for the numbers now, so the bot sends the summary straight away
+  const manual = mode === "manual";
+  let reply = await callBot(token, "/push", {dashboard, manual});
   if (reply.need) {
     const rest = await inTab(tabId, fetchPages, [reply.need, first.lastUrl, PAGE_GAP]);
-    reply = await callBot(token, "/push", {dashboard, pages: rest.pages});
+    reply = await callBot(token, "/push", {dashboard, pages: rest.pages, manual});
   }
   if (!reply.done) {
     const error = new Error(reply.error || "The bot couldn't read the pages");

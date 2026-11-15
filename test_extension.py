@@ -293,6 +293,7 @@ class ExtensionTest(unittest.TestCase):
         self.assertEqual(self.history()[0]["mode"], "manual")
         self.assertTrue(self.history()[0]["ok"])
         self.assertNotEqual(self.state["fetched_at"], fetched)
+        self.assertTrue(any("<pre>" in text for text in self.sent), self.sent)  # the summary, right away
 
     def test_4_refresh_reads_at_your_next_portal_page_and_answers(self):
         self.state["refresh_wanted"] = "2026-11-15T14:00:00"
