@@ -1,15 +1,8 @@
-const FIELDS = ["token", "usn", "dob", "last4"];
 const $ = (id) => document.getElementById(id);
 
 function showStatus(ok, text) {
   $("status").className = ok === null ? "" : ok ? "ok" : "bad";
   $("status").textContent = text;
-}
-
-function showAuto(auto) {
-  $("auto").checked = Boolean(auto);
-  $("auto").disabled = auto === undefined; // the first check runs in front of you
-  $("auto-hint").hidden = auto !== undefined;
 }
 
 function showHistory(history = []) {
@@ -24,32 +17,30 @@ function showHistory(history = []) {
 
 $("settings").addEventListener("submit", async (event) => {
   event.preventDefault();
-  await chrome.storage.local.set(Object.fromEntries(FIELDS.map((f) => [f, $(f).value.trim()])));
+  await chrome.storage.local.set({token: $("token").value.trim()});
   showStatus(true, "Saved.");
 });
 
-$("auto").addEventListener("change", () => chrome.storage.local.set({auto: $("auto").checked}));
+function showPaused(paused) {
+  $("paused").hidden = !paused;
+  if (paused) $("paused-at").textContent = new Date(paused).toLocaleString();
+}
 
-$("run").addEventListener("click", async () => {
-  $("run").disabled = true;
-  showStatus(null, "Checking the portal… If it asks for a security code, type it in the tab and press Login.");
-  try {
-    const result = await chrome.runtime.sendMessage("run-now");
-    showStatus(result.ok, result.message);
-  } catch (error) {
-    showStatus(false, `The check stopped unexpectedly: ${error.message}`);
-  }
-  $("run").disabled = false;
+$("auto").addEventListener("change", async () => {
+  await chrome.storage.local.set({autoRead: $("auto").checked});
+  if ($("auto").checked) await chrome.storage.local.remove("paused"); // ticking it is a fresh start
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.history) showHistory(changes.history.newValue);
-  if (changes.auto) showAuto(changes.auto.newValue);
+  if (changes.autoRead) $("auto").checked = changes.autoRead.newValue !== false;
+  if (changes.paused) showPaused(changes.paused.newValue);
 });
 
 chrome.storage.local.get().then((s) => {
-  for (const f of FIELDS) $(f).value = s[f] || "";
-  showAuto(s.auto);
+  $("token").value = s.token || "";
+  $("auto").checked = s.autoRead !== false; // on unless you turned it off
+  showPaused(s.paused);
   showHistory(s.history);
 });

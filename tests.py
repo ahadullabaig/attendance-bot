@@ -362,15 +362,6 @@ class FetchDueTest(BotTestCase):
         self.assertFalse(self.due(self.at("23:00"), fetched_at=stale, fetch_failed=twice))
         self.assertTrue(self.due(self.at("18:30", 1), fetched_at=stale, fetch_failed=twice))  # a new day
 
-    def test_security_code_means_no_more_automatic_tries_today(self):
-        # A retry would stop at the same code box, so only your Run now can log in today
-        stale, stopped = iso(self.at("18:40", -1)), iso(self.at("18:30"))
-        failed = [stopped]
-        self.assertFalse(self.due(self.at("19:30"), fetched_at=stale, fetch_failed=failed, needs_you=stopped))
-        self.assertTrue(self.due(self.at("20:00"), fetched_at=stale, fetch_failed=failed, needs_you=stopped,
-                                 refresh_wanted=iso(self.at("19:59"))))
-        self.assertTrue(self.due(self.at("18:30", 1), fetched_at=stale, fetch_failed=failed, needs_you=stopped))
-
 
 class DailySummaryTest(BotTestCase):
     def setUp(self):
@@ -396,16 +387,23 @@ class DailySummaryTest(BotTestCase):
             bot.send_daily(state, self.at("22:00"))
             bot.send_daily(state, self.at("22:05"))
         send.assert_called_once()
-        self.assertIn("hasn't checked the portal since 18:30", send.call_args.args[0])
+        self.assertIn("no numbers have come in since 18:30", send.call_args.args[0])
+        self.assertIn("Log in to the portal", send.call_args.args[0])
         self.assertTrue(bot.daily_due(state, self.at("22:10")))  # the summary still comes with the numbers
 
-    def test_notice_says_when_the_security_code_is_why(self):
-        state = {"offset": 0, "daily_snapshot": self.old, "data": self.old, "fetched_at": iso(self.at("18:35", -1)),
-                 "needs_you": iso(self.at("18:30"))}
+    def test_reminds_you_once_to_log_in_when_the_read_falls_due(self):
+        # Only you can log in to the portal now, so the day starts with a nudge
+        state = {"offset": 0, "fetched_at": iso(self.at("18:35", -1))}
+        self.assertFalse(bot.reminder_due(state, self.at("18:29")))
+        self.assertTrue(bot.reminder_due(state, self.at("18:30")))
         with mock.patch.object(bot, "send") as send:
-            bot.send_daily(state, self.at("22:00"))
-        self.assertIn("wants a security code", send.call_args.args[0])
-        self.assertIn("Run now", send.call_args.args[0])
+            bot.send_reminder(state, self.at("18:30"))
+        self.assertIn("log in to the portal", send.call_args.args[0])
+        self.assertFalse(bot.reminder_due(bot.load_state(), self.at("21:00")))
+        self.assertTrue(bot.reminder_due(state, self.at("18:30", 1)))  # and again the next day
+
+    def test_no_reminder_once_todays_numbers_are_in(self):
+        self.assertFalse(bot.reminder_due({"fetched_at": iso(self.at("18:31"))}, self.at("18:45")))
 
     def test_telegram_down_retries_with_the_same_changes(self):
         state = {"offset": 0, "daily_snapshot": self.old, "data": self.new, "fetched_at": iso(self.at("18:35"))}
@@ -460,7 +458,7 @@ class PushTest(BotTestCase):
         self.assertTrue((attendance.DEBUG_DIR / "pushed-dashboard.html").exists())
         self.assertEqual(len(state["fetch_failed"]), 1)
         self.assertNotIn("refresh_wanted", state)  # one try per /refresh
-        self.assertIn("Send /refresh to try again", bot.send.call_args.args[0])
+        self.assertIn("Click the extension's icon on a portal page", bot.send.call_args.args[0])
 
     def test_unreadable_course_page_is_a_failure(self):
         state = {"offset": 0}
@@ -474,26 +472,8 @@ class PushTest(BotTestCase):
         self.assertTrue((attendance.DEBUG_DIR / "extension-failed.html").exists())
         message = bot.send.call_args.args[0]
         self.assertIn("reCAPTCHA didn&#x27;t pass", message)
-        self.assertIn("try again in an hour", message)
+        self.assertIn("Click the extension's icon", message)
         self.assertEqual(len(bot.load_state()["fetch_failed"]), 1)
-
-    def test_security_code_report_says_what_to_do_and_doesnt_promise_a_retry(self):
-        state = {"offset": 0}
-        bot.on_failed(state, {"error": "The portal's login now asks for a security code. Click Run now.",
-                              "needs_you": True, "url": "x", "html": "<html>login</html>"})
-        message = bot.send.call_args.args[0]
-        self.assertIn("security code", message)
-        self.assertNotIn("try again", message)
-        self.assertNotIn("No more automatic tries", message)
-        self.assertIn("needs_you", bot.load_state())
-        # Your Run now gets the numbers, and tomorrow's automatic check goes ahead as usual
-        bot.on_push(state, {"dashboard": DASHBOARD, "pages": {COURSE_PAGE: DETAIL}})
-        self.assertNotIn("needs_you", state)
-
-    def test_only_a_real_true_counts_as_needs_you(self):
-        state = {"offset": 0}
-        bot.on_failed(state, {"error": "reCAPTCHA didn't pass", "needs_you": "false"})
-        self.assertNotIn("needs_you", state)
 
     def test_bot_never_contacts_the_portal(self):
         # The portal's firewall banned the bot's server: only the extension, in your browser, logs in
@@ -527,8 +507,16 @@ class ServerTest(BotTestCase):
     def test_due(self):
         status, body = self.call("/due")
         self.assertEqual(status, 200)
-        self.assertIs(body["fetch"], True)
-        self.assertEqual((body["login_url"], body["dashboard_url"]), (attendance.LOGIN_URL, attendance.DASHBOARD_URL))
+        self.assertIs(body["read"], True)
+        self.assertEqual((body["referrer"], body["dashboard_url"]), (attendance.LOGIN_URL, attendance.DASHBOARD_URL))
+
+    def test_extensions_before_2_never_get_a_yes(self):
+        # They log in by themselves, which the portal refuses: fetch stays false, and without
+        # login_url their Run now can't open the portal either
+        self.state["refresh_wanted"] = iso(datetime.now())
+        status, body = self.call("/due")
+        self.assertIs(body["fetch"], False)
+        self.assertNotIn("login_url", body)
 
     def test_push_round_trip(self):
         status, body = self.call("/push", {"dashboard": DASHBOARD})
@@ -566,8 +554,8 @@ class HandleTest(BotTestCase):
         return {"offset": 0, "fetched_at": iso(datetime.now() - age),
                 "data": snapshot(course("CS501", "Operating Systems", 9, 3, 30))}
 
-    def test_refresh_asks_the_laptop(self):
-        self.assertIn("Asked your laptop", self.handle("/refresh", {"offset": 0}))
+    def test_refresh_waits_for_your_next_login(self):
+        self.assertIn("next time you're logged in", self.handle("/refresh", {"offset": 0}))
         self.assertIn("refresh_wanted", bot.load_state())
 
     def test_shows_the_latest_numbers(self):

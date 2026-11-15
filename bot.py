@@ -39,9 +39,9 @@ PUSH_TOKEN = os.environ.get("PUSH_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8080"))
 
 STATE_FILE = attendance.DATA_DIR / ".bot-state.json"
-FETCH_LEAD = timedelta(minutes=30)  # the extension checks the portal this long before the daily summary
-RETRY_AFTER = timedelta(hours=1)    # after a failed check
-MAX_TRIES = 2                       # automatic checks per day: a broken login shouldn't retry all evening
+FETCH_LEAD = timedelta(minutes=30)  # the day's read falls due, with a reminder, this long before the summary
+RETRY_AFTER = timedelta(hours=1)    # after a failed read, before another counts as due
+MAX_TRIES = 2                       # reads a day: a broken page shouldn't be retried all evening
 NOTICE_AFTER = timedelta(hours=3)   # this long past DAILY_AT without today's numbers, say so once
 STALE_AFTER = timedelta(days=1)
 MAX_BODY = 10_000_000               # the dashboard plus every course page is well under 1 MB
@@ -49,9 +49,9 @@ SMALL_WORDS = {"and", "of", "on", "the", "for", "in", "to", "with", "&"}
 # Table names picked by hand where the automatic rule doesn't give what I'd call the course
 NICKNAMES = {"NoSQL Databases": "NoSQL"}
 HELP = (
-    "/attendance — the latest numbers from your laptop\n"
-    "/refresh — ask your laptop to check the portal now (Chrome needs to be open)\n"
-    f"A summary also arrives every day at {DAILY_AT}, once your laptop has checked the portal."
+    "/attendance — the latest numbers\n"
+    "/refresh — send fresh numbers the next time you're logged in to the portal in Chrome\n"
+    f"Half an hour before the {DAILY_AT} summary I remind you to log in to the portal; the summary follows once you have."
 )
 
 # The web server's threads and the Telegram loop share the state dict; one of them at a time
@@ -113,21 +113,14 @@ def failures_since(state, when):
     return [t for t in map(datetime.fromisoformat, state.get("fetch_failed", [])) if t >= when]
 
 
-def needs_you_since(state, when):
-    """Whether a check since then stopped at something only you can do, like the login page's
-    security code, which an automatic retry would stop at too."""
-    stopped = state.get("needs_you")
-    return bool(stopped) and datetime.fromisoformat(stopped) >= when
-
-
 def fetch_due(state, now):
-    """Whether the extension should check the portal now. The portal updates once a day, so one
-    check a day is enough, plus one for each /refresh. After a failure, wait an hour and try once
-    more, then leave it until tomorrow: every try is a login from your own connection."""
+    """Whether the extension should read the portal the next time you're logged in. The portal
+    updates once a day, so one read a day is enough, plus one for each /refresh. After a failure,
+    wait an hour and allow one more, then leave it until tomorrow."""
     if state.get("refresh_wanted"):
         return True
     since = fetch_time(now)
-    if checked_since(state, since) or needs_you_since(state, since):
+    if checked_since(state, since):
         return False
     failed = failures_since(state, since)
     return len(failed) < MAX_TRIES and (not failed or now - max(failed) >= RETRY_AFTER)
@@ -235,9 +228,23 @@ def daily_due(state, now):
     return now >= at_time(DAILY_AT, now) and state.get("last_daily") != now.date().isoformat()
 
 
+def reminder_due(state, now):
+    """Once a day when the read falls due, unless today's numbers are already in. Only you can log
+    in to the portal now, so the extension waits for you."""
+    due = at_time(DAILY_AT, now) - FETCH_LEAD
+    return now >= due and not checked_since(state, due) and state.get("reminded") != now.date().isoformat()
+
+
+def send_reminder(state, now):
+    send("📋 Time to check attendance: log in to the portal in Chrome and stay on the first page for a few"
+         " seconds. The extension sends the numbers, and the summary comes here.")
+    state["reminded"] = now.date().isoformat()  # only once it's sent, so a Telegram hiccup retries
+    save_state(state)
+
+
 def send_daily(state, now):
     """Send today's summary once today's numbers are in. If they haven't come a few hours after
-    DAILY_AT (laptop off, or the check failed), say so once; the summary follows when they arrive."""
+    DAILY_AT (you didn't log in, or the read failed), say so once; the summary follows when they arrive."""
     today = now.date().isoformat()
     if checked_since(state, fetch_time(now)):
         diff = changes(state.get("daily_snapshot"), state["data"])
@@ -246,15 +253,10 @@ def send_daily(state, now):
         state.update(last_daily=today, daily_snapshot=state["data"])
         save_state(state)
     elif now >= at_time(DAILY_AT, now) + NOTICE_AFTER and state.get("daily_notice") != today:
-        last = (f"Its last check was {pretty_time(datetime.fromisoformat(state['fetched_at']))}."
-                if state.get("fetched_at") else "It hasn't sent any numbers yet.")
-        if needs_you_since(state, fetch_time(now)):
-            send("⚠️ No summary yet: the portal's login wants a security code, which your laptop can't type. "
-                 f"{last}\nClick Run now in the extension and type the code; the summary follows. "
-                 "/attendance shows the last numbers.")
-        else:
-            send(f"⚠️ No summary yet: your laptop hasn't checked the portal since {fetch_time(now):%H:%M}. {last}\n"
-                 "The summary comes as soon as it does (Chrome needs to be open). /attendance shows the last numbers.")
+        last = (f"The last numbers are from {pretty_time(datetime.fromisoformat(state['fetched_at']))}."
+                if state.get("fetched_at") else "There are no numbers yet.")
+        send(f"⚠️ No summary yet: no numbers have come in since {fetch_time(now):%H:%M}. {last}\n"
+             "Log in to the portal in Chrome and the summary follows. /attendance shows the last numbers.")
         state["daily_notice"] = today
         save_state(state)
 
@@ -269,33 +271,25 @@ def notify(text):
         log(f"Couldn't message Telegram ({e})")
 
 
-def fetch_failed(state, reason, needs_you=False):
-    """Record a failed check, so fetch_due() backs off, and say what went wrong."""
+def fetch_failed(state, reason):
+    """Record a failed read, so fetch_due() backs off, and say what went wrong."""
     now = datetime.now()
     state["fetch_failed"] = [*state.get("fetch_failed", [])[-9:], now.isoformat(timespec="seconds")]
-    if needs_you:
-        state["needs_you"] = now.isoformat(timespec="seconds")
-    asked = state.pop("refresh_wanted", None)  # one try per /refresh
+    state.pop("refresh_wanted", None)  # one try per /refresh
     save_state(state)
-    log(f"The extension's portal check failed: {reason}")
-    if needs_you:
-        then = ""  # the reason says what to do; no automatic retry today, it would stop there too
-    elif asked:
-        then = "\nSend /refresh to try again."
-    elif checked_since(state, fetch_time(now)):
-        then = ""  # a manual run on top of today's check; today's numbers are already in
-    elif fetch_due(state, now + RETRY_AFTER):
-        then = "\nIt'll try again in an hour."
+    log(f"The extension's portal read failed: {reason}")
+    if checked_since(state, fetch_time(now)):
+        then = ""  # a read on top of today's; today's numbers are already in
     else:
-        then = "\nNo more automatic tries today; send /refresh to try again."
-    notify(f"⚠️ Your laptop couldn't check the portal: {html.escape(reason)}{then}")
+        # The extension stops reading by itself after a failure, so it's over to you
+        then = "\nClick the extension's icon on a portal page to try again."
+    notify(f"⚠️ Couldn't read your attendance from the portal: {html.escape(reason)}{then}")
 
 
 def accept(state, data):
     now = datetime.now()
     state.update(data=data, fetched_at=now.isoformat(timespec="seconds"))
     state.pop("fetch_failed", None)
-    state.pop("needs_you", None)
     asked = state.pop("refresh_wanted", None)
     save_state(state)
     log(f"Got attendance for {len(data['courses'])} courses from the extension")
@@ -311,8 +305,11 @@ def accept(state, data):
 
 
 def on_due(state, body):
-    return {"fetch": fetch_due(state, datetime.now()),
-            "login_url": attendance.LOGIN_URL, "dashboard_url": attendance.DASHBOARD_URL}
+    # "fetch" and "login_url" are what extensions before 2.0 act on: they log in by themselves when
+    # fetch is true, and the portal now refuses those logins. An install that hasn't been updated
+    # gets a permanent no, and without login_url its Run now fails before opening the portal.
+    return {"fetch": False, "read": fetch_due(state, datetime.now()),
+            "referrer": attendance.LOGIN_URL, "dashboard_url": attendance.DASHBOARD_URL}
 
 
 def on_push(state, body):
@@ -325,7 +322,7 @@ def on_push(state, body):
         data = attendance.parse_dashboard(dashboard)
         if data is None:
             path = attendance.save_html("pushed-dashboard", dashboard)
-            raise attendance.PortalError(f"The page your laptop sent isn't the dashboard (saved to {path})")
+            raise attendance.PortalError(f"The page the extension sent isn't the dashboard (saved to {path})")
         need = [c["detail_url"] for c in data["courses"] if c["detail_url"] and c["detail_url"] not in pages]
         if need:
             return {"done": False, "need": need}
@@ -343,13 +340,13 @@ def on_failed(state, body):
     reason = " ".join(str(body.get("error") or "unknown error").split())[:300]
     if isinstance(body.get("html"), str):
         reason += f" (page saved to {attendance.save_html('extension-failed', body['html'])})"
-    fetch_failed(state, reason, needs_you=body.get("needs_you") is True)
+    fetch_failed(state, reason)
     return {"ok": True}
 
 
 class PushHandler(BaseHTTPRequestHandler):
-    """The Chrome extension's way in: GET /due asks whether to check the portal, POST /push hands
-    over the pages and POST /failed reports a check that went wrong. All need the PUSH_TOKEN."""
+    """The Chrome extension's way in: GET /due asks whether to read the portal, POST /push hands
+    over the pages and POST /failed reports a read that went wrong. All need the PUSH_TOKEN."""
 
     timeout = 30  # a stalled client can't hold a thread forever
     GET = {"/due": on_due}
@@ -425,19 +422,19 @@ def handle(message, state):
     if command == "/refresh":
         state["refresh_wanted"] = datetime.now().isoformat(timespec="seconds")
         save_state(state)
-        send("⏳ Asked your laptop to check the portal. If Chrome is open, the numbers come here"
-             " within a few minutes.")
+        send("⏳ OK: the next time you're logged in to the portal in Chrome, the extension sends fresh"
+             " numbers here. Already logged in? Click the extension's icon on the portal page.")
         return
 
     # Anything else counts as "show my attendance"
     if "data" not in state:
-        send("No numbers yet: your laptop hasn't sent any. Send /refresh with Chrome open.")
+        send("No numbers yet: log in to the portal in Chrome, with the extension installed.")
         return
     fetched = datetime.fromisoformat(state["fetched_at"])
     stale = ""
     if datetime.now() - fetched >= STALE_AFTER:
-        stale = (f"⚠️ These numbers are from {pretty_time(fetched)}: your laptop hasn't checked"
-                 " the portal since.\n\n")
+        stale = (f"⚠️ These numbers are from {pretty_time(fetched)}. Log in to the portal in Chrome"
+                 " to update them.\n\n")
     send(stale + summary(state))
 
 
@@ -455,7 +452,7 @@ def main():
     me = tg("getMe")
     tg("setMyCommands", commands=[
         {"command": "attendance", "description": "Latest attendance"},
-        {"command": "refresh", "description": "Ask your laptop to check the portal now"},
+        {"command": "refresh", "description": "Fresh numbers at your next portal login"},
         {"command": "help", "description": "What this bot does"},
     ])
 
@@ -470,6 +467,8 @@ def main():
         try:
             with LOCK:
                 now = datetime.now()
+                if CHAT_ID and reminder_due(state, now):
+                    send_reminder(state, now)
                 if CHAT_ID and daily_due(state, now):
                     send_daily(state, now)
             updates = tg("getUpdates", offset=state.get("offset", 0), timeout=50, allowed_updates=["message"])

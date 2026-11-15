@@ -22,33 +22,28 @@
 </head>
 <body>
 <h1>Attendance bot fetcher</h1>
-<p>Once a day, this logs in to the MSRIT parents portal in a background tab, reads your
-attendance and sends it to your Telegram bot. It skips a check while you have the portal open,
-since the portal allows one login at a time.</p>
+<p>After you log in to the MSRIT parents portal yourself, this reads your attendance from that
+session and sends it to your Telegram bot. It never logs in, fills in or clicks anything on the
+portal: the portal refuses logins done by an extension.</p>
 
 <form id="settings">
   <label for="token">Bot token</label>
   <input id="token" type="password" autocomplete="off" required>
   <small>The PUSH_TOKEN set on the bot.</small>
-  <label for="usn">USN</label>
-  <input id="usn" type="text" autocomplete="off" spellcheck="false" required>
-  <label for="dob">Date of birth</label>
-  <input id="dob" type="date" required>
-  <label for="last4">Last 4 digits of your father's mobile</label>
-  <input id="last4" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" required>
   <button type="submit">Save</button>
 </form>
 
-<h2>Checks</h2>
-<label class="check"><input id="auto" type="checkbox"> Check automatically</label>
-<small id="auto-hint">Turns on by itself after the first successful Run now.</small>
-<div><button id="run">Run now</button></div>
-<p class="hint">Run now opens the portal in a tab in front of you, so you can watch it log in, type
-the security code if the login page asks for one, and solve a captcha puzzle if Google shows one.
-Automatic checks can't get past a security code: they tell you in Telegram to click Run now.</p>
+<h2>Reads</h2>
+<label class="check"><input id="auto" type="checkbox"> Read automatically when I'm logged in and the bot wants numbers</label>
+<p class="hint">The bot wants numbers once a day from 18:30 (it reminds you in Telegram) and after
+/refresh. Log in to the portal in a normal tab, get past the verification step and stay on the
+page for a few seconds: the extension's icon shows … while it reads and ✓ once it's sent. To send
+right away, click the icon while you're on a portal page.</p>
+<p id="paused" class="bad" hidden>Automatic reads are paused after a read failed (<span id="paused-at"></span>).
+They resume after the next read that works: click the icon on a portal page.</p>
 <div id="status" role="status"></div>
 
-<h2>Recent checks</h2>
+<h2>Recent reads</h2>
 <p id="none" class="hint">None yet.</p>
 <ol id="history"></ol>
 <script src="options.js"></script>
