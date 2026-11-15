@@ -6,7 +6,7 @@ ENV TZ=Asia/Kolkata \
 
 # No browser: the bot never logs in to the portal, the Chrome extension does that from your own
 # browser. attendance.py still imports Playwright, so the package stays; without a browser to run,
-# nothing in this image can log in by accident. tzdata so DAILY_AT means Indian time.
+# nothing in this image can log in by accident. tzdata so the times in messages are Indian time.
 RUN pip install --no-cache-dir playwright==1.63.0 beautifulsoup4 requests \
  && apt-get update \
  && apt-get install -y --no-install-recommends tzdata \

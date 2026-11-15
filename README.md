@@ -1,6 +1,6 @@
 # MSRIT Attendance Bot
 
-Keep an eye on your attendance on the [MSRIT parents portal](https://parents.msrit.edu/newparents/index.php) from Telegram. Once a day the bot reminds you to log in to the portal. When you do, a small Chrome extension reads your attendance pages from that session and sends them to the bot. The bot runs 24/7, answers `/attendance` straight away, and sends a summary every evening with what changed since the day before.
+Keep an eye on your attendance on the [MSRIT parents portal](https://parents.msrit.edu/newparents/index.php) from Telegram. Log in to the portal and click a small Chrome extension's icon: it reads your attendance pages from that session and sends them to the bot, which replies with a summary and what changed since your last read. The bot runs 24/7 and answers `/attendance` with the latest numbers.
 
 It also does the math the portal doesn't: how many classes you can still skip in each course, and how many in a row you need to attend to get back above 85%.
 
@@ -22,23 +22,19 @@ It also does the math the portal doesn't: how many classes you can still skip in
 | Command | What it does |
 |---|---|
 | `/attendance` (or any message) | The latest numbers. If they're more than a day old, it says so. |
-| `/refresh` | Asks for fresh numbers the next time you're logged in to the portal in Chrome. Already logged in? Click the extension's icon on the portal page instead. |
-| `/help` | Lists the commands. |
+| `/help` | Lists the commands, and how to get fresh numbers. |
 
-- **Daily reminder** 30 minutes before `DAILY_AT` (18:30 by default) to log in to the portal, unless that day's numbers are already in.
-- **Summary on demand:** a click on the extension's icon, or `/refresh`, gets you the summary as soon as the read works. Automatic reads wait for the daily summary.
-- **Daily summary** at `DAILY_AT` (default 19:00, local time), with a "Since last summary" section listing new presents and absences. It waits for that day's numbers. If they haven't arrived three hours later, it says so once, and the summary follows when they do.
+- **A summary for every read.** Each time you click the extension's icon, the bot sends the full table, starting with what changed since your last read: new presents and absences, corrections, a changed number of classes left, courses that appeared or went. If nothing changed, it says so.
+- **No schedule.** The bot never reminds you or asks for numbers; reads happen when you click. (`/refresh` and the 19:00 daily summary are gone. `/refresh` now just says so.)
 - **Only answers you.** Messages from any chat other than `TELEGRAM_CHAT_ID` are ignored and logged.
 - **Never contacts the portal itself.** See [How it works](#how-it-works) for why.
 
 **Chrome extension** (`extension/`)
 
 - **Never logs in.** You log in to the portal yourself, in a normal tab: USN, date of birth, security code, verification. The extension doesn't fill in, click or submit anything on the portal, doesn't open or close tabs, and doesn't keep your portal login.
-- **Reads once you're in.** When a page of this term's portal (`/newparents/`, past the login) finishes loading, it asks the bot whether a read is due. If so, it fetches the dashboard and each course page from your session, about a second and a half apart, and sends them to the bot. The icon shows … while it reads and ✓ once it's sent, so stay on the page for those few seconds.
-- A read is due once a day from 30 minutes before `DAILY_AT` (18:30 by default), and after each `/refresh`.
-- **Click the icon to send now.** On a portal page, clicking the extension's icon reads straight away, due or not, and the bot sends you the summary as soon as the read works. Anywhere else it opens the settings.
-- **Stands down after a failure.** If an automatic read fails, automatic reads pause, so a broken portal page doesn't trigger a read on every page you open. The next read that works, such as a click on the icon, ends the pause. Leaving the page mid-read isn't a failure; the next portal page tries again.
-- **One read at a time.** It waits a second for a page that redirects by script, and two portal tabs loading together start one read, not two.
+- **Does nothing until you click.** Click its icon on a page of this term's portal (`/newparents/`, past the login): it fetches the dashboard and each course page from your session, about a second and a half apart, and sends them to the bot. The icon shows … while it reads, ✓ once the summary is in Telegram, and ! if something went wrong (the settings page says what). Stay on the page for those few seconds.
+- Clicked anywhere else, the icon opens the settings. On the login or verification page it shows ? and reads nothing.
+- **One read at a time,** so a double click reads once. Leaving the page mid-read isn't a failure; click again.
 
 **Command line** (`attendance.py`)
 
@@ -58,7 +54,7 @@ The first line is what the phone notification shows, so it carries the verdict. 
 ```
 📊 Attendance — 2 courses below 85%
 
-🆕 Since last summary
+🆕 Since your last read (26 Sep, 18:31)
 • Big Data Computing: +2 present
 • Parallel Programming on GPUs: absent 22-09-2026
 
@@ -77,31 +73,34 @@ Skip = classes you can still miss and end the semester at 85%
 Portal updated 28 Sep · checked 18:31
 ```
 
+When nothing changed, the "Since your last read" section is a single line instead: `No changes since your last read (26 Sep, 18:31).` The rest of the message is the same.
+
 Long course names are shortened automatically for the table: `Parallel Programming on GPUs` → `PPG`, `Natural Language Processing Laboratory` → `NLP Lab`. Names that already fit are kept as they are, unless `NICKNAMES` in `bot.py` picks one by hand (`NoSQL Databases` → `NoSQL`).
 
 ## How it works
 
 ```
  your laptop                                       Fly.io
-┌────────────────────────────────┐  GET /due     ┌─────────────────────────┐
+┌────────────────────────────────┐  GET /portal  ┌─────────────────────────┐
 │ Chrome: you log in to the      │──────────────►│ bot.py                  │
-│ portal. extension/ asks: is a  │               │  decides when to read,  │
-│ read due? if so, from your     │  POST /push   │  reminds you            │
-│ session: fetch the dashboard   │──────────────►│  reads the pages with   │──► Telegram
-│ and each course page           │               │  attendance.py, math    │
+│ portal and click the icon.     │               │  reads the pages with   │
+│ extension/ fetches, from your  │  POST /push   │  attendance.py, does    │
+│ session, the dashboard and     │──────────────►│  the math, compares     │──► Telegram
+│ each course page               │               │  with your last read    │
 └──────────┬─────────────────────┘               └─────────────────────────┘
            │ your own connection,
-           ▼ once a day
+           ▼ when you click
    parents.msrit.edu
 ```
 
 1. **The bot never contacts the portal.** The portal came back from a week-long outage in late October 2026 with a firewall that bans IPs that look like bots. It banned the bot's Fly.io server within the hour. So the portal traffic moved to your own browser, on your own connection, at the pace of a person clicking through.
-2. **You log in; nothing else does.** From 31 October the extension logged in by itself. Since 14 November the portal refuses logins filled in by an extension, so logging in is yours again, and the bot reminds you when a read is due.
-3. **The bot decides, the extension reads.** When you're logged in and on a portal page, the extension asks `GET /due`. The bot answers yes once a day and after `/refresh`.
+2. **You log in, and you decide when to read.** From 31 October the extension logged in by itself once a day. Since 14 November the portal refuses logins filled in by an extension, and it added a typed security code the next day: it's built to keep automation out. So logging in is yours, and a read happens only when you click.
+3. **The click asks the bot first.** `GET /portal` checks the token and gives the addresses to read, before anything goes to the portal.
 4. **Only the bot reads pages.** The extension fetches the dashboard and sends it to `POST /push`. The bot answers with the course pages it needs, the extension fetches those and sends them too. Only `attendance.py`'s parsers know what the portal's pages look like.
-5. **Failures come to the chat.** If a read fails, the extension sends the reason (and nothing from the page you're on) to `POST /failed`, and the bot tells you in Telegram. A dashboard the bot can't read is saved to `DATA_DIR/debug/`.
+5. **Every read gets a summary.** The bot compares the new numbers with the last read whose summary reached you, and sends the summary. If Telegram is down, the extension's icon shows !, and the next read reports the changes instead.
+6. **Failures come to the chat.** If a read fails, the extension sends the reason (and nothing from the page you're on) to `POST /failed`, and the bot tells you in Telegram. A dashboard the bot can't read is saved to `DATA_DIR/debug/`.
 
-`/due` still answers the fields extension versions before 2.0 act on (`fetch`, always false, and no `login_url`), so an install that hasn't been updated can't log in by itself.
+Older extension versions started by asking `GET /due` (1.x to log in by itself, 2.0 to read on every page load). That address is gone, so an install that hasn't been updated does nothing.
 
 All three addresses need the `PUSH_TOKEN`, and Fly only serves them over HTTPS.
 
@@ -121,6 +120,7 @@ These explain most of the design decisions:
 - **Empty counts mean zero.** A course with no classes recorded shows `Present[]` and `Absent []`; the parser treats these as 0.
 - **An "Attendance rules" popup covers the dashboard** and blocks clicks. Pages are loaded by URL instead of by clicking.
 - **The site has several portals.** `parents.msrit.edu` opens on a term chooser (`/webfiles/`) that links to this term's portal (`/newparents/`) and others (`/newparentseven/`, …). The extension only reads `/newparents/`.
+- **Pages after the login have `ksign=` in the address.** Useful for telling whether you're logged in.
 
 ## Setup
 
@@ -156,9 +156,9 @@ python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 1. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the `extension` folder.
 2. Pin the extension (puzzle-piece icon → pin) and click it to open its settings.
 3. Fill in the push token and click **Save**. That's all it needs: it never logs in, so it has no use for your portal login.
-4. Once the bot is running (next section), log in to the portal yourself and, on the first page after the verification step, click the extension's icon. It shows ✓ when it has sent your attendance.
+4. Once the bot is running (next section), log in to the portal yourself and, on the first page after the verification step, click the extension's icon. It shows ✓ when the summary is in Telegram.
 
-**Recent reads** on the settings page lists the last 20 reads and what happened. After you pull a new version of the extension, click the reload icon on its card in `chrome://extensions`. Use it in one Chrome only: each install reads by itself.
+**Recent reads** on the settings page lists the last 20 reads and what happened. After you pull a new version of the extension, click the reload icon on its card in `chrome://extensions`.
 
 ### 4. Command line (optional)
 
@@ -196,7 +196,7 @@ fly apps create attendance-bot-6767            # app names are global; change it
 fly volumes create bot_data --region sin --size 1 --yes
 fly ips allocate-v4 --shared                   # free; gives attendance-bot-6767.fly.dev an address
 fly ips allocate-v6
-grep -E '^(TELEGRAM_|DAILY_AT|PUSH_TOKEN)' .env | fly secrets import --stage
+grep -E '^(TELEGRAM_|PUSH_TOKEN)' .env | fly secrets import --stage
 fly deploy --ha=false --remote-only
 ```
 
@@ -225,7 +225,7 @@ A manual `fly deploy` still works, but it ships your local folder, including unc
 ```sh
 fly logs -a attendance-bot-6767                          # live log
 fly deploy --ha=false --remote-only                      # deploy by hand (pushing code to main also deploys)
-fly secrets set DAILY_AT=20:30 -a attendance-bot-6767    # change a setting (restarts the bot)
+fly secrets set PUSH_TOKEN=… -a attendance-bot-6767     # change a setting (restarts the bot)
 fly scale count 0 -a attendance-bot-6767                 # pause; `count 1` to resume
 fly ssh console -a attendance-bot-6767                   # shell on the machine
 fly ssh console -a attendance-bot-6767 -C "cat /data/.bot-state.json"     # cache and state
@@ -235,8 +235,9 @@ What shows up in the log:
 
 | Line | Meaning |
 |---|---|
-| `Running as @…, daily summary at 19:00, listening for the extension on port 8080` | Started. |
-| `Got attendance for 7 courses from the extension` | A read worked. |
+| `Running as @…, listening for the extension on port 8080` | Started. |
+| `Got attendance for 7 courses from the extension` | A read worked; the summary goes out next. |
+| `Couldn't message Telegram (…); the next read is compared with the same baseline` | The read worked but the summary didn't go out. The next read reports the changes. |
 | `The extension's portal read failed: …` | A read didn't work; the rest of the line says why. The chat gets the same message. |
 | `Ignoring message from chat …` | A stranger messaged the bot. |
 | `Telegram unreachable (…), retrying in 15s` | Network blip. |
@@ -253,7 +254,6 @@ Set these in `.env` locally, or with `fly secrets set` on Fly. Real environment 
 | `TELEGRAM_TOKEN` | bot | – | From @BotFather |
 | `TELEGRAM_CHAT_ID` | bot | – | The only chat the bot answers |
 | `PUSH_TOKEN` | bot | – | Shared with the extension; at least 20 characters |
-| `DAILY_AT` | – | `19:00` | Daily summary time (`HH:MM`, local time; the container is set to `Asia/Kolkata`). The day's read falls due, with a reminder, 30 minutes before. |
 | `PORT` | – | `8080` | The extension's web server; `fly.toml` expects 8080 |
 | `DATA_DIR` | – | project folder | Where bot state and debug pages go (`/data` in the container) |
 | `USN` | CLI | – | Portal username, e.g. `1MS24AI000` |
@@ -266,9 +266,7 @@ Tuning constants in the code:
 | Constant | File | Value |
 |---|---|---|
 | `REQUIRED` / `CONDONABLE` | `attendance.py` | 85 / 75 (the portal's own rules) |
-| `FETCH_LEAD` | `bot.py` | 30 minutes before `DAILY_AT` (the read falls due and the reminder goes out) |
-| `RETRY_AFTER` / `MAX_TRIES` | `bot.py` | after a failed read, 1 hour before another counts as due / 2 a day |
-| `NOTICE_AFTER` | `bot.py` | 3 hours after `DAILY_AT` |
+| `STALE_AFTER` | `bot.py` | 1 day: older numbers get a warning in `/attendance` |
 | `PORTAL` | `extension/background.js` | the only portal it reads, `https://parents.msrit.edu/newparents/` |
 | `RUN_TIMEOUT` | `extension/background.js` | 3 minutes per read |
 | `PAGE_GAP` | `extension/background.js` | 1.5 seconds between course pages |
@@ -302,13 +300,14 @@ The extension's settings page lists recent reads and what happened. Failed reads
 
 | Symptom | Cause / fix |
 |---|---|
-| `No summary yet: no numbers have come in since 18:30` | You haven't logged in to the portal since the read fell due, or automatic reads are off or paused in the extension's settings. Log in; the summary follows within seconds. |
 | `Login not allowed: This portal cannot be used from third-party apps` | The portal's answer to a login done by a script, such as an extension before 2.0. Update or remove that install, and log in by hand. |
-| `isn't the dashboard` / `Couldn't read the attendance page` | Your session had ended, or the portal's layout changed. Automatic reads are paused. Log in again and click the icon (a read that works ends the pause); if it fails again, the page is saved on the bot's machine: fetch it with `fly ssh sftp get /data/debug/<file> -a attendance-bot-6767` and compare it with the parser in `attendance.py`. |
-| `Stopped: the tab left the page before the read finished` | You clicked on before the ✓. Nothing's wrong; the next portal page reads again. |
+| `isn't the dashboard` / `Couldn't read the attendance page` | Your session had ended, or the portal's layout changed. Log in again and click the icon; if it fails again, the page is saved on the bot's machine: fetch it with `fly ssh sftp get /data/debug/<file> -a attendance-bot-6767` and compare it with the parser in `attendance.py`. |
+| `Stopped: the tab left the page before the read finished` | You clicked on before the ✓. Nothing's wrong; click the icon again. |
+| `… but it couldn't message Telegram` | The read worked; Telegram didn't. `/attendance` has the numbers, and the next read's summary includes the changes. |
 | `Log in to the portal first` | You clicked the icon on the login or verification page. |
 | `The portal didn't load (net::ERR_CONNECTION_REFUSED)` in Chrome | The portal is down, or it has blocked your connection. If it opens on your phone's mobile data, it's a block: talk to college IT. |
-| The extension does nothing | Check its settings: automatic reads must be on and not paused. Check that you're past the verification step (the address has `ksign=` in it). Clicking the icon on the portal page reads regardless. For details, open `chrome://extensions`, click **service worker** on its card, and look at the console. |
+| `The bot answered HTTP 404` | The extension is older than the bot (it asks for `/due`). Reload it in `chrome://extensions`. |
+| Clicking the icon does nothing | A read may already be running (wait for the ✓). For details, open `chrome://extensions`, click **service worker** on its card, and look at the console. |
 | `The bot didn't accept the token` | The push token in the extension's settings doesn't match `PUSH_TOKEN` on the bot. |
 | `409 Conflict` / `Telegram unreachable` repeating in the log | Two copies of the bot are polling Telegram. Stop one. |
 
@@ -316,7 +315,7 @@ The extension's settings page lists recent reads and what happened. Failed reads
 
 ```
 attendance.py           page reading and math (plus the CLI's scripted login, which the portal now refuses)
-bot.py                  Telegram bot and the extension's web server: commands, schedule, daily summary
+bot.py                  Telegram bot and the extension's web server: commands, a summary for every read
 extension/              Chrome extension: reads the pages from your logged-in session and sends them to the bot
 tests.py                offline tests: uv run tests.py
 test_extension.py       the extension in Chromium against a fake portal: uv run test_extension.py
@@ -333,7 +332,7 @@ Git-ignored runtime files (in `DATA_DIR`):
 
 ```
 .env                 credentials and tokens
-.bot-state.json      Telegram offset, latest numbers, daily snapshot, read schedule
+.bot-state.json      Telegram offset, latest numbers, and the last numbers you were sent (the baseline)
 debug/               pages saved when reading fails, or with --dump
 .session.json        CLI only: portal session cookie + User-Agent
 .browser-profile/    CLI only: Chromium profile (keeps Google's cookies, which helps the captcha)
@@ -341,8 +340,8 @@ debug/               pages saved when reading fails, or with --dump
 
 ## Limitations
 
-- **Needs you every day:** the numbers only come in when you log in to the portal in Chrome. A day you don't gets a notice instead of a summary.
-- **Data freshness:** the portal updates attendance about once a day ("Last Updated On"), so reading more often shows nothing new.
+- **Needs you:** the numbers only come in when you log in to the portal and click. Nothing reminds you.
+- **Data freshness:** the portal updates attendance about once a day ("Last Updated On" in the summary), so reading more often shows nothing new.
 - **Screen scraping:** the bot reads the portal's pages, so a portal redesign breaks the parsing until the code is updated.
 - **The portal doesn't want third-party tools.** It refuses scripted logins outright. The extension only reads pages from a session you opened, but whether the portal tolerates that is up to the portal, and it could start refusing it too. If a read ever logs you out or gets refused, stop using the extension.
-- **Personal use:** one read a day, from your own browser and session. Keep it that way.
+- **Personal use:** a read when you want one, from your own browser and session. Keep it that way.

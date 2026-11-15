@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Attendance bot fetcher",
-  "version": "2.0",
-  "description": "After you log in to the MSRIT parents portal, reads your attendance from that session and sends it to your Telegram bot. It never logs in itself.",
-  "permissions": ["scripting", "storage", "webNavigation"],
+  "version": "3.0",
+  "description": "Click it while you're logged in to the MSRIT parents portal: it reads your attendance from that session and sends it to your Telegram bot. It never logs in, and does nothing until you click.",
+  "permissions": ["scripting", "storage"],
   "host_permissions": ["https://parents.msrit.edu/*", "https://attendance-bot-6767.fly.dev/*"],
   "background": {"service_worker": "background.js"},
   "options_page": "options.html",
-  "action": {"default_title": "Attendance bot: click on a portal page to send your attendance now"}
+  "action": {"default_title": "Attendance bot: click on a portal page to read your attendance"}
 }

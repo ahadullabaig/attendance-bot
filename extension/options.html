@@ -22,9 +22,10 @@
 </head>
 <body>
 <h1>Attendance bot fetcher</h1>
-<p>After you log in to the MSRIT parents portal yourself, this reads your attendance from that
-session and sends it to your Telegram bot. It never logs in, fills in or clicks anything on the
-portal: the portal refuses logins done by an extension.</p>
+<p>Log in to the MSRIT parents portal yourself, then click this extension's icon. It reads your
+attendance from that session and sends it to your Telegram bot, which replies with the summary and
+what changed since your last read. It never logs in, never fills in or clicks anything on the
+portal, and does nothing until you click: the portal is built to keep automation out.</p>
 
 <form id="settings">
   <label for="token">Bot token</label>
@@ -32,17 +33,12 @@ portal: the portal refuses logins done by an extension.</p>
   <small>The PUSH_TOKEN set on the bot.</small>
   <button type="submit">Save</button>
 </form>
-
-<h2>Reads</h2>
-<label class="check"><input id="auto" type="checkbox"> Read automatically when I'm logged in and the bot wants numbers</label>
-<p class="hint">The bot wants numbers once a day from 18:30 (it reminds you in Telegram) and after
-/refresh. Log in to the portal in a normal tab, get past the verification step and stay on the
-page for a few seconds: the extension's icon shows … while it reads and ✓ once it's sent. To send
-right away, click the icon while you're on a portal page; the summary then comes to Telegram
-straight away.</p>
-<p id="paused" class="bad" hidden>Automatic reads are paused after a read failed (<span id="paused-at"></span>).
-They resume after the next read that works: click the icon on a portal page.</p>
 <div id="status" role="status"></div>
+
+<h2>How to read</h2>
+<p class="hint">Log in to the portal in a normal tab and get past the verification step. On any
+portal page after that, click the icon and stay on the page for a few seconds: it shows … while it
+reads and ✓ once the summary is in Telegram. A ! means it didn't work; the reason is below.</p>
 
 <h2>Recent reads</h2>
 <p id="none" class="hint">None yet.</p>

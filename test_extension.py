@@ -5,8 +5,8 @@
 # ///
 """End-to-end test of the Chrome extension: the real extension in Chromium, the bot's real web
 server, and a fake portal that behaves like the real one (invisible captcha, verification step,
-Referer rule). The test logs in by hand, the way you do, and checks that the extension only reads.
-Nothing here reaches the real portal or Telegram.
+Referer rule). The test logs in by hand, the way you do, clicks the icon, and checks that the
+extension only reads, and only when clicked. Nothing here reaches the real portal or Telegram.
 
     uv run test_extension.py
 
@@ -16,8 +16,6 @@ own Chromium (install it with: uv run --with playwright python -m playwright ins
 
 import os
 import shutil
-import socket
-import sys
 import tempfile
 import threading
 import time
@@ -85,6 +83,7 @@ class FakePortal(BaseHTTPRequestHandler):
     code = "K7Q2P"  # the security code to ask for, like the real login page since November 2026
     broken_dashboard = False  # serve something else at the dashboard's address
     course_page_delay = 0  # seconds, to leave time to walk away mid-read
+    detail = DETAIL  # the course page; a test can change it to see a change reported
 
     def login_page(self, headers=()):
         box = ('<img alt="Security code" src="data:,">'
@@ -120,9 +119,6 @@ class FakePortal(BaseHTTPRequestHandler):
             return self.login_page()
         if self.cookies().get("session") != "good":
             return self.login_page()
-        if query.get("ksign") == ["hop"]:  # a landing page that moves on by script, as some do
-            return self.page("<html><body><script>setTimeout(function () {"
-                             " location.replace('index.php?ksign=landed'); }, 300);</script></body></html>")
         if "ksign" in query:
             return self.page("<html><body>Welcome</body></html>")
         origin = f"http://{self.headers['Host']}/"
@@ -131,7 +127,7 @@ class FakePortal(BaseHTTPRequestHandler):
         if query["task"] == ["dashboard"]:
             return self.page("<html><body>Something else</body></html>" if self.broken_dashboard else DASHBOARD)
         time.sleep(self.course_page_delay)
-        self.page(DETAIL)
+        self.page(self.detail)
 
     def do_POST(self):
         self.requests.append(("POST", self.path, self.headers.get("Referer")))
@@ -254,21 +250,35 @@ class ExtensionTest(unittest.TestCase):
             time.sleep(0.2)
         self.fail("the extension didn't finish a read")
 
-    def tab_id(self):
-        return self.js("(await chrome.tabs.query({})).find((t) => (t.url || '').includes('ksign=')).id")
+    def tab_id(self, part="ksign=", exact=False):
+        match = f"t.url === '{part}'" if exact else f"(t.url || '').includes('{part}')"
+        return self.js(f"(await chrome.tabs.query({{}})).find((t) => {match}).id")
+
+    def click(self, part="ksign=", exact=False):
+        """Click the extension's icon on the tab whose address contains `part`, and wait for it."""
+        self.js(f"onIconClick(await chrome.tabs.get({self.tab_id(part, exact)}))")
+        return self.history()[0]
+
+    def badge(self, part="ksign="):
+        return self.js(f"chrome.action.getBadgeText({{tabId: {self.tab_id(part)}}})")
 
     def portal_gets(self):
         return [path for method, path, _ in FakePortal.requests if method == "GET" and "task=" in path]
 
-    def test_1_reads_after_you_log_in_by_hand(self):
-        before, pages = len(self.history()), len(self.browser.pages)
+    def test_1_a_click_after_logging_in_by_hand_reads_and_sends_the_summary(self):
+        pages = len(self.browser.pages)
         self.log_in_by_hand()
-        entry = self.wait_for_read(before)
-        self.assertEqual((entry["mode"], entry["ok"], entry["message"]),
-                         ("auto", True, "Sent attendance for 2 courses to the bot."))
+        time.sleep(2)
+        self.assertEqual(self.portal_gets(), [])  # logging in alone reads nothing
+        entry = self.click()
+        self.assertEqual((entry["ok"], entry["message"]),
+                         (True, "Sent attendance for 2 courses; the summary is in Telegram."))
         first, second = self.state["data"]["courses"]
         self.assertEqual((first["present"], first["absent"], first["remaining"], first["can_skip"]), (9, 3, 30, 3))
         self.assertNotIn("present", second)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("<pre>", self.sent[0])
+        self.assertNotIn("since your last read", self.sent[0].lower())  # the first read
         # The only POSTs are the two you made; the extension opened no tab and only read pages
         self.assertEqual(sum(1 for method, _, _ in FakePortal.requests if method == "POST"), 2)
         self.assertEqual(len(self.browser.pages), pages + 1)
@@ -276,40 +286,37 @@ class ExtensionTest(unittest.TestCase):
         for method, path, referer in FakePortal.requests:
             if "task=" in path:
                 self.assertTrue(referer and referer.startswith(attendance.BASE), (path, referer))
-        self.assertEqual(self.js(f"chrome.action.getBadgeText({{tabId: {self.tab_id()}}})"), "✓")
+        self.assertEqual(self.badge(), "✓")
         self.assertIn("Welcome", self.tab.content())  # your session is still alive
 
-    def test_2_nothing_is_read_when_no_read_is_due(self):
+    def test_2_browsing_the_portal_never_reads_by_itself(self):
         before = len(self.history())
         self.tab.reload()
-        time.sleep(3)
+        self.tab.goto(attendance.BASE + "index.php?ksign=another")
+        time.sleep(2)
         self.assertEqual(self.portal_gets(), [])
         self.assertEqual(len(self.history()), before)
+        self.assertEqual(self.sent, [])
 
-    def test_3_clicking_the_icon_on_a_portal_page_reads_now(self):
-        fetched = self.state["fetched_at"]
-        time.sleep(1.1)  # fetched_at has whole seconds
-        self.js(f"onIconClick(await chrome.tabs.get({self.tab_id()}))")
-        self.assertEqual(self.history()[0]["mode"], "manual")
-        self.assertTrue(self.history()[0]["ok"])
-        self.assertNotEqual(self.state["fetched_at"], fetched)
-        self.assertTrue(any("<pre>" in text for text in self.sent), self.sent)  # the summary, right away
+    def test_3_the_next_click_says_what_changed_since_the_last_read(self):
+        self.click()
+        self.assertIn("No changes since your last read", self.sent[-1])
+        self.assertIn("<pre>", self.sent[-1])  # the full table all the same
+        FakePortal.detail = DETAIL.replace("Present[9]", "Present[10]").replace("Still to go[30]", "Still to go[29]")
+        try:
+            self.click()
+        finally:
+            FakePortal.detail = DETAIL
+        self.assertIn("Since your last read", self.sent[-1])
+        self.assertIn("• Operating Systems: +1 present", self.sent[-1])
+        self.click()  # and back, so later tests start from the usual numbers
+        self.sent.clear()
 
-    def test_4_refresh_reads_at_your_next_portal_page_and_answers(self):
-        self.state["refresh_wanted"] = "2026-11-15T14:00:00"
-        before = len(self.history())
-        self.tab.reload()
-        self.assertTrue(self.wait_for_read(before)["ok"])
-        self.assertNotIn("refresh_wanted", self.state)
-        self.assertTrue(any("<pre>" in text for text in self.sent), self.sent)
-
-    def test_5_leaving_the_page_mid_read_isnt_a_failure(self):
-        self.state["refresh_wanted"] = "2026-11-15T14:00:00"
-        failures = len(self.state.get("fetch_failed", []))
+    def test_4_leaving_the_page_mid_read_isnt_a_failure(self):
         before = len(self.history())
         FakePortal.course_page_delay = 3
         try:
-            self.tab.reload()
+            self.js(f"(onIconClick(await chrome.tabs.get({self.tab_id()})), null)")  # click, don't wait
             for _ in range(50):  # until the read has got as far as the course page
                 if any("courseId" in path for path in self.portal_gets()):
                     break
@@ -320,103 +327,77 @@ class ExtensionTest(unittest.TestCase):
             FakePortal.course_page_delay = 0
         self.assertFalse(entry["ok"])
         self.assertIn("left the page", entry["message"])
-        self.assertEqual(len(self.state.get("fetch_failed", [])), failures)
-        self.assertEqual(self.sent, [])
-        self.assertIn("refresh_wanted", self.state)  # still wanted: the next page tries again
-        self.state.pop("refresh_wanted")
+        self.assertEqual(self.sent, [])  # no failure message, and no summary
 
-    def test_6_a_failed_read_pauses_automatic_reads_until_one_works(self):
-        self.state["refresh_wanted"] = "2026-11-15T14:00:00"
-        before = len(self.history())
+    def test_5_a_failed_read_says_why_and_the_next_click_works(self):
         FakePortal.broken_dashboard = True
         try:
-            self.tab.reload()
-            entry = self.wait_for_read(before)
+            entry = self.click()
         finally:
             FakePortal.broken_dashboard = False
         self.assertFalse(entry["ok"])
-        self.assertIn("Automatic reads are paused", entry["message"])
-        self.assertTrue(self.js("(await chrome.storage.local.get()).paused"))
+        self.assertIn("isn't the dashboard", entry["message"])
+        self.assertEqual(self.badge(), "!")
         self.assertTrue(any("Couldn't read your attendance" in text for text in self.sent), self.sent)
-        # Paused means paused: the next page, with a read wanted, doesn't try again
-        self.state["refresh_wanted"] = "2026-11-15T14:05:00"
-        FakePortal.requests.clear()
-        self.tab.reload()
-        time.sleep(3)
-        self.assertEqual(self.portal_gets(), [])
-        # Clicking the icon works, and that ends the pause: the next wanted read happens by itself
-        self.js(f"onIconClick(await chrome.tabs.get({self.tab_id()}))")
-        self.assertTrue(self.history()[0]["ok"])
-        self.assertNotIn("paused", self.js("chrome.storage.local.get()"))
-        self.state["refresh_wanted"] = "2026-11-15T14:10:00"
-        before = len(self.history())
-        self.tab.reload()
-        self.assertEqual((self.wait_for_read(before)["mode"]), "auto")
+        self.assertTrue(self.click()["ok"])
 
-    def test_7_one_read_per_login_even_with_a_redirect_or_two_tabs(self):
-        # A landing page that moves on by script: only the page it lands on is read
-        self.state["refresh_wanted"] = "2026-11-15T14:00:00"
+    def test_6_a_double_click_reads_once(self):
         before = len(self.history())
-        self.tab.goto(attendance.BASE + "index.php?ksign=hop")
-        self.assertTrue(self.wait_for_read(before)["ok"])
-        time.sleep(1.5)  # in case a second read were coming
+        tab_id = self.tab_id()
+        self.js(f"chrome.tabs.get({tab_id}).then((t) => Promise.all([onIconClick(t), onIconClick(t)]))")
         self.assertEqual(sum(1 for path in self.portal_gets() if "task=dashboard" in path), 1)
         self.assertEqual(len(self.history()), before + 1)
-        landed = self.js("(await chrome.tabs.query({})).find((t) => (t.url || '').includes('ksign=landed')).id")
-        self.assertEqual(self.js(f"chrome.action.getBadgeText({{tabId: {landed}}})"), "✓")
 
-        # Two portal tabs loading at the same moment
-        other = self.browser.new_page()
-        try:
-            other.goto(attendance.BASE + "index.php?ksign=abc")
-            time.sleep(1.5)  # not due yet, so that load read nothing
-            FakePortal.requests.clear()
-            self.state["refresh_wanted"] = "2026-11-15T14:05:00"
-            before = len(self.history())
-            for page in (self.tab, other):
-                page.evaluate("location.reload()")
-            self.wait_for_read(before)
-            time.sleep(2)
-            self.assertEqual(sum(1 for path in self.portal_gets() if "task=dashboard" in path), 1)
-            self.assertEqual(len(self.history()), before + 1)
-        finally:
-            other.close()
+    def test_7_telegram_down_shows_on_the_icon(self):
+        with mock.patch.object(bot, "send", side_effect=ConnectionError("Telegram is down")):
+            entry = self.click()
+        self.assertFalse(entry["ok"])
+        self.assertIn("couldn't message Telegram", entry["message"])
+        self.assertEqual(self.badge(), "!")
 
-    def test_8_no_reads_before_login_or_outside_this_terms_portal(self):
-        self.state["refresh_wanted"] = "2026-11-15T14:00:00"
+    def test_8_clicks_before_login_or_off_this_terms_portal_read_nothing(self):
         before = len(self.history())
         origin = attendance.BASE.rsplit("/newparents/", 1)[0]
         page = self.browser.new_page()
         try:
-            for url in (attendance.LOGIN_URL, origin + "/webfiles/", origin + "/newparentseven/index.php?ksign=x"):
+            page.goto(attendance.LOGIN_URL)
+            self.assertIn("Log in to the portal first", self.click(attendance.LOGIN_URL, exact=True)["message"])
+            # Off this term's portal, a click opens the settings instead
+            for url in (origin + "/webfiles/", origin + "/newparentseven/index.php?ksign=x"):
                 page.goto(url)
+                self.js(f"onIconClick(await chrome.tabs.get({self.tab_id(url.rsplit('/', 2)[-2])}))")
+                for _ in range(30):  # the settings tab appears a moment after the click returns
+                    options = self.js("(await chrome.tabs.query({}))"
+                                      ".filter((t) => (t.url || t.pendingUrl || '').endsWith('/options.html')).map((t) => t.id)")
+                    if options:
+                        break
+                    time.sleep(0.1)
+                self.assertEqual(len(options), 1, url)
+                self.js(f"chrome.tabs.remove({options[0]})")
             # A ksign address that shows the login page, as it does once the session has ended
             self.browser.clear_cookies()
             page.goto(attendance.BASE + "index.php?ksign=abc")
-            time.sleep(3)
+            self.assertIn("Log in to the portal first", self.click("ksign=abc")["message"])
+            self.assertEqual(self.badge("ksign=abc"), "?")
             self.assertEqual(self.portal_gets(), [])
-            self.assertEqual(len(self.history()), before)
-            # Clicking the icon there says to log in first, and reads nothing
-            tab_id = self.js("(await chrome.tabs.query({})).find((t) => (t.url || '').includes('ksign=abc')).id")
-            self.js(f"onIconClick(await chrome.tabs.get({tab_id}))")
-            self.assertIn("Log in to the portal first", self.history()[0]["message"])
-            self.assertEqual(self.js(f"chrome.action.getBadgeText({{tabId: {tab_id}}})"), "?")
-            self.assertEqual(self.portal_gets(), [])
+            self.assertEqual(len(self.history()), before + 2)
         finally:
             page.close()
-            self.state.pop("refresh_wanted", None)
 
     def test_9_only_reads_and_forgets_what_older_versions_kept(self):
-        # The portal refuses logins done by an extension; this one never fills in, clicks or opens anything
+        # The portal refuses logins done by an extension, and is built to keep automation out: this
+        # one never fills in, clicks or opens anything, and has no way to act without a click
         source = (EXTENSION / "background.js").read_text()
         for forbidden in (".click(", ".submit(", "dispatchEvent", "tabs.create", "tabs.remove", "tabs.update",
-                          ".value =", ".focus(", "outerHTML"):
+                          ".value =", ".focus(", "outerHTML", "webNavigation", "alarms", "tabs.onUpdated"):
             self.assertNotIn(forbidden, source)
-        # Older versions kept your portal login, and an "auto" switch that meant logging in by itself
-        self.js("chrome.storage.local.set({usn: 'x', dob: 'y', last4: 'z', runs: [1], auto: false})")
-        self.js("forgetPortalLogin()")
+        manifest = (EXTENSION / "manifest.json").read_text()
+        self.assertIn('"permissions": ["scripting", "storage"]', manifest)
+        self.js("chrome.storage.local.set({usn: 'x', dob: 'y', last4: 'z', runs: [1], auto: false,"
+                " autoRead: false, paused: 'x'})")
+        self.js("forgetOldSettings()")
         stored = self.js("chrome.storage.local.get()")
-        for key in ("usn", "dob", "last4", "runs", "auto"):
+        for key in ("usn", "dob", "last4", "runs", "auto", "autoRead", "paused"):
             self.assertNotIn(key, stored)
         self.assertEqual(stored["token"], TOKEN)
 

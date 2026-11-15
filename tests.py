@@ -20,7 +20,7 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.request
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -267,7 +267,38 @@ class ChangesTest(unittest.TestCase):
         self.assertEqual(bot.changes(old, new), [
             "• Operating Systems: +2 present, absent 29-10-2026",
             "• R&amp;D Methods: +1 present",
+            "• Cloud Computing: new on the portal",
         ])
+
+    def test_identical_reads_have_no_changes(self):
+        read = snapshot(course("CS501", "Operating Systems", 9, 1, 30, ["02-09-2026"]))
+        self.assertEqual(bot.changes(read, read), [])
+
+    def test_every_difference_gets_a_line(self):
+        # "No changes" is only said for an empty list, so nothing that moves Skip may go unmentioned
+        old = snapshot(course("CS501", "Operating Systems", 9, 1, 30),
+                       course("CS502", "R&D Methods", 5, 2, 30, ["01-09-2026", "02-09-2026"]),
+                       course("CS503", "Compiler Design", 4, 0, 30),
+                       {"code": "CS504", "name": "Cloud Computing", "attendance": 0.0, "detail_url": None})
+        new = snapshot(course("CS501", "Operating Systems", 9, 1, 28),       # the plan changed: Skip moves
+                       course("CS502", "R&D Methods", 4, 1, 30, ["01-09-2026"]),  # corrected
+                       course("CS504", "Cloud Computing", 1, 0, 30))           # details now shown
+        self.assertEqual(bot.changes(old, new), [
+            "• Operating Systems: classes left 30 → 28",
+            "• R&amp;D Methods: present 5 → 4, absent 2 → 1",
+            "• Cloud Computing: attendance details now shown",
+            "• Compiler Design: no longer on the portal",
+        ])
+
+    def test_courses_without_details_and_anything_else_still_count(self):
+        def dashboard_only(attendance):
+            return {"code": "CS505", "name": "Ethics", "attendance": attendance, "detail_url": None}
+        renamed = dict(course("CS501", "Operating Systems", 9, 1, 30), name="Operating Systems I")
+        old = snapshot(dashboard_only(80.0), course("CS501", "Operating Systems", 9, 1, 30))
+        new = snapshot(dashboard_only(85.0), renamed)
+        self.assertEqual(bot.changes(old, new), ["• Ethics: 80% → 85%", "• Operating Systems I: changed on the portal"])
+        moved = snapshot(dict(dashboard_only(80.0), detail_url="index.php?x"), course("CS501", "Operating Systems", 9, 1, 30))
+        self.assertEqual(bot.changes(old, moved), [])  # only the link moved: no change worth a line
 
 
 class SummaryTest(unittest.TestCase):
@@ -291,6 +322,17 @@ class SummaryTest(unittest.TestCase):
     def test_course_names_are_escaped(self):
         text = bot.summary(self.state(course("CS501", "R&D <Methods>", 9, 3, 30)))
         self.assertIn("⚠️ <b>R&amp;D &lt;Methods&gt;</b>", text)
+
+    def test_says_what_changed_since_the_last_read_or_that_nothing_did(self):
+        state = self.state(course("CS501", "Operating Systems", 12, 1, 30))
+        last = datetime(2026, 10, 27, 18, 31)
+        changed = bot.summary(state, ["• Operating Systems: +1 present"], since=last)
+        self.assertIn("🆕 <b>Since your last read</b> (27 Oct, 18:31)\n• Operating Systems: +1 present", changed)
+        same = bot.summary(state, [], since=last)
+        self.assertIn("No changes since your last read (27 Oct, 18:31).", same)
+        self.assertIn("<pre>", same)  # the full table either way
+        first = bot.summary(state)
+        self.assertNotIn("since your last read", first.lower())
 
 
 class StateTest(unittest.TestCase):
@@ -318,100 +360,61 @@ def iso(when):
 
 
 class BotTestCase(unittest.TestCase):
-    """Fixed settings, so a local .env (DAILY_AT, the chat ID) can't change the results."""
-
-    day = datetime(2026, 10, 29)
+    """Fixed settings, so a local .env (the chat ID, the push token) can't change the results."""
 
     def setUp(self):
-        for name, value in (("DAILY_AT", "19:00"), ("CHAT_ID", "1234"), ("PUSH_TOKEN", "t" * 32)):
+        for name, value in (("CHAT_ID", "1234"), ("PUSH_TOKEN", "t" * 32)):
             patcher = mock.patch.object(bot, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
         bot.STATE_FILE.unlink(missing_ok=True)
 
-    def at(self, hhmm, days=0):
-        return bot.at_time(hhmm, self.day) + timedelta(days=days)
 
+class ReadSummaryTest(BotTestCase):
+    """Every read sends the summary, compared with the last read whose summary went out."""
 
-class FetchDueTest(BotTestCase):
-    def due(self, now, **state):
-        return bot.fetch_due(state, now)
-
-    def test_once_a_day_from_half_an_hour_before_the_summary(self):
-        yesterday = iso(self.at("18:40", -1))
-        self.assertFalse(self.due(self.at("18:29"), fetched_at=yesterday))
-        self.assertTrue(self.due(self.at("18:30"), fetched_at=yesterday))
-        self.assertFalse(self.due(self.at("21:00"), fetched_at=iso(self.at("18:31"))))
-        self.assertFalse(self.due(self.at("09:00", 1), fetched_at=iso(self.at("18:31"))))
-
-    def test_first_check_and_missed_evenings_are_due_straight_away(self):
-        self.assertTrue(self.due(self.at("09:00")))
-        self.assertTrue(self.due(self.at("09:00"), fetched_at=iso(self.at("18:40", -2))))
-
-    def test_refresh_is_due_even_after_todays_check(self):
-        self.assertTrue(self.due(self.at("21:00"), fetched_at=iso(self.at("18:31")),
-                                 refresh_wanted=iso(self.at("20:59"))))
-
-    def test_after_a_failure_waits_an_hour_then_tries_once_more(self):
-        # Every try is a login from your own connection, so a broken login mustn't retry all evening
-        stale = iso(self.at("18:40", -1))
-        once = [iso(self.at("18:30"))]
-        self.assertFalse(self.due(self.at("19:00"), fetched_at=stale, fetch_failed=once))
-        self.assertTrue(self.due(self.at("19:30"), fetched_at=stale, fetch_failed=once))
-        twice = once + [iso(self.at("19:30"))]
-        self.assertFalse(self.due(self.at("23:00"), fetched_at=stale, fetch_failed=twice))
-        self.assertTrue(self.due(self.at("18:30", 1), fetched_at=stale, fetch_failed=twice))  # a new day
-
-
-class DailySummaryTest(BotTestCase):
     def setUp(self):
         super().setUp()
+        for name, value in (("send", mock.Mock()), ("log", mock.Mock())):
+            patcher = mock.patch.object(bot, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.old = snapshot(course("CS501", "Operating Systems", 9, 3, 30))
         self.new = snapshot(course("CS501", "Operating Systems", 10, 3, 29))
 
-    def test_sent_once_todays_numbers_are_in(self):
-        state = {"offset": 0, "daily_snapshot": self.old, "data": self.new, "fetched_at": iso(self.at("18:35"))}
-        self.assertTrue(bot.daily_due(state, self.at("19:00")))
-        with mock.patch.object(bot, "send") as send:
-            bot.send_daily(state, self.at("19:00"))
-        self.assertIn("• Operating Systems: +1 present", send.call_args.args[0])
-        saved = bot.load_state()
-        self.assertEqual(saved["daily_snapshot"], self.new)
-        self.assertFalse(bot.daily_due(saved, self.at("20:00")))
+    def test_first_read_has_nothing_to_compare(self):
+        state = {"offset": 0}
+        self.assertTrue(bot.accept(state, self.old))
+        self.assertNotIn("since your last read", bot.send.call_args.args[0].lower())
+        self.assertEqual(state["baseline"]["data"], self.old)
 
-    def test_waits_for_todays_numbers_and_says_so_once_if_they_dont_come(self):
-        state = {"offset": 0, "daily_snapshot": self.old, "data": self.old, "fetched_at": iso(self.at("18:35", -1))}
-        with mock.patch.object(bot, "send") as send:
-            bot.send_daily(state, self.at("19:00"))
-            send.assert_not_called()  # the laptop may still check this evening
-            bot.send_daily(state, self.at("22:00"))
-            bot.send_daily(state, self.at("22:05"))
-        send.assert_called_once()
-        self.assertIn("no numbers have come in since 18:30", send.call_args.args[0])
-        self.assertIn("Log in to the portal", send.call_args.args[0])
-        self.assertTrue(bot.daily_due(state, self.at("22:10")))  # the summary still comes with the numbers
+    def test_next_reads_say_what_changed_or_that_nothing_did(self):
+        state = {"offset": 0}
+        bot.accept(state, self.old)
+        bot.accept(state, self.old)
+        self.assertIn("No changes since your last read", bot.send.call_args.args[0])
+        bot.accept(state, self.new)
+        self.assertIn("• Operating Systems: +1 present", bot.send.call_args.args[0])
+        self.assertEqual(bot.load_state()["baseline"]["data"], self.new)
 
-    def test_reminds_you_once_to_log_in_when_the_read_falls_due(self):
-        # Only you can log in to the portal now, so the day starts with a nudge
-        state = {"offset": 0, "fetched_at": iso(self.at("18:35", -1))}
-        self.assertFalse(bot.reminder_due(state, self.at("18:29")))
-        self.assertTrue(bot.reminder_due(state, self.at("18:30")))
-        with mock.patch.object(bot, "send") as send:
-            bot.send_reminder(state, self.at("18:30"))
-        self.assertIn("log in to the portal", send.call_args.args[0])
-        self.assertFalse(bot.reminder_due(bot.load_state(), self.at("21:00")))
-        self.assertTrue(bot.reminder_due(state, self.at("18:30", 1)))  # and again the next day
+    def test_telegram_down_keeps_the_baseline(self):
+        # So the changes come with the next read instead of going unmentioned
+        state = {"offset": 0}
+        bot.accept(state, self.old)
+        bot.send.side_effect = urllib.error.URLError("offline")
+        self.assertFalse(bot.accept(state, self.new))
+        self.assertEqual(state["data"], self.new)  # /attendance has the new numbers meanwhile
+        self.assertEqual(state["baseline"]["data"], self.old)
+        bot.send.side_effect = None
+        self.assertTrue(bot.accept(state, self.new))
+        self.assertIn("+1 present", bot.send.call_args.args[0])
 
-    def test_no_reminder_once_todays_numbers_are_in(self):
-        self.assertFalse(bot.reminder_due({"fetched_at": iso(self.at("18:31"))}, self.at("18:45")))
-
-    def test_telegram_down_retries_with_the_same_changes(self):
-        state = {"offset": 0, "daily_snapshot": self.old, "data": self.new, "fetched_at": iso(self.at("18:35"))}
-        with mock.patch.object(bot, "send", side_effect=urllib.error.URLError("offline")):
-            with self.assertRaises(urllib.error.URLError):
-                bot.send_daily(state, self.at("19:00"))
-        self.assertNotIn("last_daily", state)
-        self.assertEqual(state["daily_snapshot"], self.old)
+    def test_old_state_is_migrated(self):
+        state = {"offset": 7, "data": self.old, "fetched_at": "2026-11-15T14:36:00", "daily_snapshot": self.old,
+                 "last_daily": "2026-11-14", "daily_notice": "2026-11-13", "reminded": "2026-11-15",
+                 "fetch_failed": [], "refresh_wanted": "2026-11-15T14:00:00"}
+        self.assertEqual(bot.migrate(state), {"offset": 7, "data": self.old, "fetched_at": "2026-11-15T14:36:00",
+                                              "baseline": {"data": self.old, "fetched_at": "2026-11-15T14:36:00"}})
 
 
 COURSE_PAGE = attendance.BASE + "index.php?option=com_studentdashboard&task=attendencelist&courseId=CS501"
@@ -420,48 +423,30 @@ COURSE_PAGE = attendance.BASE + "index.php?option=com_studentdashboard&task=atte
 class PushTest(BotTestCase):
     def setUp(self):
         super().setUp()
-        for name, value in (("send", mock.Mock()), ("log", mock.Mock()), ("daily_due", lambda *a: False)):
+        for name, value in (("send", mock.Mock()), ("log", mock.Mock())):
             patcher = mock.patch.object(bot, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
 
     def test_asks_for_the_course_pages_then_takes_them(self):
-        state = {"offset": 0, "fetch_failed": [iso(self.at("18:30"))]}
+        state = {"offset": 0}
         self.assertEqual(bot.on_push(state, {"dashboard": DASHBOARD}), {"done": False, "need": [COURSE_PAGE]})
         self.assertNotIn("data", state)
         self.assertEqual(bot.on_push(state, {"dashboard": DASHBOARD, "pages": {COURSE_PAGE: DETAIL}}),
-                         {"done": True, "courses": 2})
+                         {"done": True, "courses": 2, "sent": True})
         first, second = state["data"]["courses"]
         self.assertEqual((first["present"], first["absent"], first["remaining"], first["can_skip"]), (9, 3, 30, 3))
         self.assertNotIn("present", second)  # no link to a detail page
-        self.assertNotIn("fetch_failed", state)
         self.assertEqual(bot.load_state()["data"], state["data"])
-        bot.send.assert_not_called()  # nobody asked, and the daily summary isn't due
-
-    def test_a_click_on_the_icon_gets_the_summary_straight_away(self):
-        bot.on_push({"offset": 0}, {"dashboard": DASHBOARD, "pages": {COURSE_PAGE: DETAIL}, "manual": True})
-        self.assertIn("<pre>", bot.send.call_args.args[0])
-
-    def test_answers_a_refresh(self):
-        state = {"offset": 0, "refresh_wanted": iso(self.at("10:00"))}
-        bot.on_push(state, {"dashboard": DASHBOARD, "pages": {COURSE_PAGE: DETAIL}})
-        self.assertNotIn("refresh_wanted", state)
-        self.assertIn("<pre>", bot.send.call_args.args[0])
-
-    def test_sends_the_daily_summary_when_its_waiting_for_these_numbers(self):
-        with (mock.patch.object(bot, "daily_due", return_value=True),
-              mock.patch.object(bot, "send_daily") as send_daily):
-            bot.on_push({"offset": 0}, {"dashboard": DASHBOARD, "pages": {COURSE_PAGE: DETAIL}})
-        send_daily.assert_called_once()
+        self.assertIn("<pre>", bot.send.call_args.args[0])  # every read gets the summary
 
     def test_wrong_page_is_saved_and_reported(self):
-        state = {"offset": 0, "refresh_wanted": iso(self.at("10:00"))}
+        state = {"offset": 0}
         reply = bot.on_push(state, {"dashboard": "<html><form id='login'></form></html>"})
         self.assertFalse(reply["done"])
         self.assertIn("isn't the dashboard", reply["error"])
         self.assertTrue((attendance.DEBUG_DIR / "pushed-dashboard.html").exists())
-        self.assertEqual(len(state["fetch_failed"]), 1)
-        self.assertNotIn("refresh_wanted", state)  # one try per /refresh
+        self.assertNotIn("data", state)
         self.assertIn("Click the extension's icon on a portal page", bot.send.call_args.args[0])
 
     def test_unreadable_course_page_is_a_failure(self):
@@ -472,12 +457,10 @@ class PushTest(BotTestCase):
 
     def test_failure_report_from_the_extension(self):
         state = {"offset": 0}
-        bot.on_failed(state, {"error": "reCAPTCHA didn't pass", "url": "x", "html": "<html>captcha</html>"})
-        self.assertTrue((attendance.DEBUG_DIR / "extension-failed.html").exists())
+        bot.on_failed(state, {"error": "Couldn't load a portal page: <timeout>"})
         message = bot.send.call_args.args[0]
-        self.assertIn("reCAPTCHA didn&#x27;t pass", message)
+        self.assertIn("Couldn&#x27;t load a portal page: &lt;timeout&gt;", message)
         self.assertIn("Click the extension's icon", message)
-        self.assertEqual(len(bot.load_state()["fetch_failed"]), 1)
 
     def test_bot_never_contacts_the_portal(self):
         # The portal's firewall banned the bot's server: only the extension, in your browser, logs in
@@ -508,33 +491,29 @@ class ServerTest(BotTestCase):
         except urllib.error.HTTPError as e:
             return e.code, json.load(e)
 
-    def test_due(self):
-        status, body = self.call("/due")
+    def test_portal_addresses(self):
+        status, body = self.call("/portal")
         self.assertEqual(status, 200)
-        self.assertIs(body["read"], True)
-        self.assertEqual((body["referrer"], body["dashboard_url"]), (attendance.LOGIN_URL, attendance.DASHBOARD_URL))
+        self.assertEqual(body, {"dashboard_url": attendance.DASHBOARD_URL, "referrer": attendance.LOGIN_URL})
 
-    def test_extensions_before_2_never_get_a_yes(self):
-        # They log in by themselves, which the portal refuses: fetch stays false, and without
-        # login_url their Run now can't open the portal either
-        self.state["refresh_wanted"] = iso(datetime.now())
-        status, body = self.call("/due")
-        self.assertIs(body["fetch"], False)
-        self.assertNotIn("login_url", body)
+    def test_extensions_before_3_get_nothing(self):
+        # 1.x logged in by itself (which the portal refuses) and 2.0 read on every page load; both
+        # start by asking /due, so without it they stay idle
+        self.assertEqual(self.call("/due")[0], 404)
 
     def test_push_round_trip(self):
         status, body = self.call("/push", {"dashboard": DASHBOARD})
         self.assertEqual((status, body), (200, {"done": False, "need": [COURSE_PAGE]}))
         status, body = self.call("/push", {"dashboard": DASHBOARD, "pages": {COURSE_PAGE: DETAIL}})
-        self.assertEqual((status, body), (200, {"done": True, "courses": 2}))
+        self.assertEqual((status, body), (200, {"done": True, "courses": 2, "sent": False}))  # no chat set
         self.assertEqual(self.state["data"]["courses"][0]["present"], 9)
 
     def test_needs_the_token(self):
-        self.assertEqual(self.call("/due", token="wrong")[0], 401)
-        self.assertEqual(self.call("/due", token=None)[0], 401)
+        self.assertEqual(self.call("/portal", token="wrong")[0], 401)
+        self.assertEqual(self.call("/portal", token=None)[0], 401)
         self.assertEqual(self.call("/push", {"dashboard": DASHBOARD}, token="wrong")[0], 401)
         with mock.patch.object(bot, "PUSH_TOKEN", ""):
-            self.assertEqual(self.call("/due", token="")[0], 401)  # no token set: nothing gets in
+            self.assertEqual(self.call("/portal", token="")[0], 401)  # no token set: nothing gets in
         self.assertNotIn("data", self.state)
 
     def test_bad_requests(self):
@@ -558,9 +537,9 @@ class HandleTest(BotTestCase):
         return {"offset": 0, "fetched_at": iso(datetime.now() - age),
                 "data": snapshot(course("CS501", "Operating Systems", 9, 3, 30))}
 
-    def test_refresh_waits_for_your_next_login(self):
-        self.assertIn("next time you're logged in", self.handle("/refresh", {"offset": 0}))
-        self.assertIn("refresh_wanted", bot.load_state())
+    def test_refresh_says_its_gone(self):
+        # The bot can't start a read any more; say so instead of quietly showing old numbers
+        self.assertEqual(self.handle("/refresh", {"offset": 0}), bot.GONE)
 
     def test_shows_the_latest_numbers(self):
         self.assertTrue(self.handle("/attendance", self.numbers(timedelta(hours=2))).startswith("📊"))
@@ -581,12 +560,9 @@ class ConfigTest(unittest.TestCase):
         class PassedValidation(Exception):
             pass
 
-        cases = [("19:00", "t" * 32, True), ("7:30", "t" * 32, True), ("25:00", "t" * 32, False),
-                 ("19:60", "t" * 32, False), ("7pm", "t" * 32, False), ("19:00", "", False), ("19:00", "short", False)]
-        for daily_at, push_token, valid in cases:
-            with (self.subTest(DAILY_AT=daily_at, PUSH_TOKEN=push_token),
+        for push_token, valid in (("t" * 32, True), ("", False), ("short", False)):
+            with (self.subTest(PUSH_TOKEN=push_token),
                   mock.patch.object(bot, "TOKEN", "test"),
-                  mock.patch.object(bot, "DAILY_AT", daily_at),
                   mock.patch.object(bot, "PUSH_TOKEN", push_token),
                   mock.patch.object(bot, "tg", side_effect=PassedValidation)):
                 with self.assertRaises(PassedValidation if valid else SystemExit):
