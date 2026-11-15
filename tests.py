@@ -412,7 +412,7 @@ class ReadSummaryTest(BotTestCase):
     def test_old_state_is_migrated(self):
         state = {"offset": 7, "data": self.old, "fetched_at": "2026-11-15T14:36:00", "daily_snapshot": self.old,
                  "last_daily": "2026-11-14", "daily_notice": "2026-11-13", "reminded": "2026-11-15",
-                 "fetch_failed": [], "refresh_wanted": "2026-11-15T14:00:00"}
+                 "fetch_failed": [], "refresh_wanted": "2026-11-15T14:00:00", "needs_you": "2026-11-15T14:00:20"}
         self.assertEqual(bot.migrate(state), {"offset": 7, "data": self.old, "fetched_at": "2026-11-15T14:36:00",
                                               "baseline": {"data": self.old, "fetched_at": "2026-11-15T14:36:00"}})
 

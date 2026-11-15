@@ -51,9 +51,10 @@ HELP = (
     " here, with what changed since your last read."
 )
 GONE = "/refresh is gone: log in to the portal in Chrome and click the extension's icon for fresh numbers."
-# Left over from when the bot kept a daily schedule, or logged in itself
+# Left over from when the bot kept a daily schedule, or logged in itself, or the extension stopped
+# at the security code (needs_you)
 OLD_STATE = ("next_keepalive", "session_lost_at", "daily_tried_at", "daily_snapshot", "last_daily",
-             "daily_notice", "reminded", "fetch_failed", "refresh_wanted")
+             "daily_notice", "reminded", "fetch_failed", "refresh_wanted", "needs_you")
 
 # The web server's threads and the Telegram loop share the state dict; one of them at a time
 LOCK = threading.Lock()
