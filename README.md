@@ -186,7 +186,7 @@ systemctl --user enable --now attendance-bot
 
 ### Option B: on Fly.io, 24/7 (current setup)
 
-`fly.toml` describes one shared-cpu-1x machine with 512 MB of RAM, a 1 GB volume at `/data`, region `sin`, and the web server the extension talks to on port 8080 behind HTTPS. Fly no longer accepts new resources in Mumbai (`bom`).
+`fly.toml` describes one shared-cpu-1x machine with 256 MB of RAM (the bot uses about 45 MB), a 1 GB volume at `/data`, region `sin`, and the web server the extension talks to on port 8080 behind HTTPS. Fly no longer accepts new resources in Mumbai (`bom`).
 
 First deploy:
 
@@ -243,7 +243,7 @@ What shows up in the log:
 | `Telegram unreachable (…), retrying in 15s` | Network blip. |
 | `Stopping` | Normal shutdown during a deploy or restart. |
 
-**Cost:** about $3–4 a month (small machine plus a 1 GB volume; the shared IPv4 address is free). Check the Fly dashboard's Billing page for the exact figure.
+**Cost:** about $3 a month in `sin` (the 256 MB machine plus a 1 GB volume; the shared IPv4 and IPv6 addresses, the `fly.dev` certificate and the volume's daily snapshots are free). Fly waives a personal account's bill when the month comes to under $5. Check the Fly dashboard's Billing page for the exact figure.
 
 ## Configuration
 
